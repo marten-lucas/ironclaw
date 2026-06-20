@@ -86,7 +86,9 @@ pub use provider::{
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
     ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
-    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
+    ThinkingModeOverride, TokenUsage, ToolSelection, is_silent_reply,
+    llm_signals_tool_intent,
+    OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY,
     user_signals_execution_intent,
 };
 pub use reasoning::{
@@ -574,6 +576,7 @@ fn create_ollama_from_registry(
 
     let mut adapter = RigAdapter::new(model, &config.model)
         .with_unsupported_params(config.unsupported_params.clone())
+        .with_ollama_request_overrides(true)
         .with_model_listing(models_endpoint);
     // Ollama's /api/chat enables extended reasoning via `think: true`, but
     // rejects that parameter with HTTP 400 ("does not support thinking") for

@@ -26,6 +26,7 @@ use std::str::FromStr;
 
 use crate::costs;
 use crate::error::LlmError;
+use crate::{OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -58,6 +59,9 @@ pub struct RigAdapter<M: CompletionModel> {
     /// `CompletionModel` does not expose model discovery, so this is wired
     /// explicitly per protocol (OpenAI-compatible, Anthropic, Ollama).
     models_endpoint: Option<ModelsEndpoint>,
+    /// When enabled, parse per-request Ollama overrides from request metadata
+    /// and inject them into `additional_params`.
+    enable_ollama_request_overrides: bool,
 }
 
 /// Auth scheme applied to a model-discovery request.
@@ -251,6 +255,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             unsupported_params: HashSet::new(),
             default_additional_params: None,
             models_endpoint: None,
+            enable_ollama_request_overrides: false,
         }
     }
 
@@ -307,6 +312,12 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// provider-specific top-level fields like Ollama's `think: true`.
     pub fn with_additional_params(mut self, params: serde_json::Value) -> Self {
         self.default_additional_params = Some(params);
+        self
+    }
+
+    /// Enable per-request Ollama overrides sourced from request metadata.
+    pub fn with_ollama_request_overrides(mut self, enabled: bool) -> Self {
+        self.enable_ollama_request_overrides = enabled;
         self
     }
 
@@ -801,6 +812,49 @@ fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>)
     }
 }
 
+fn inject_ollama_request_overrides(
+    rig_req: &mut RigRequest,
+    metadata: &std::collections::HashMap<String, String>,
+) {
+    let mut overrides = serde_json::Map::new();
+
+    if let Some(raw_num_ctx) = metadata.get(OLLAMA_NUM_CTX_METADATA_KEY)
+        && let Ok(num_ctx) = raw_num_ctx.parse::<u32>()
+        && num_ctx > 0
+    {
+        overrides.insert("num_ctx".to_string(), serde_json::json!(num_ctx));
+    }
+
+    if let Some(mode) = metadata.get(OLLAMA_THINKING_MODE_METADATA_KEY).map(|value| value.trim()) {
+        match mode {
+            "on" => {
+                overrides.insert("think".to_string(), serde_json::json!(true));
+            }
+            "off" => {
+                overrides.insert("think".to_string(), serde_json::json!(false));
+            }
+            _ => {}
+        }
+    }
+
+    if overrides.is_empty() {
+        return;
+    }
+
+    match rig_req.additional_params {
+        Some(ref mut params) => {
+            if let Some(obj) = params.as_object_mut() {
+                for (key, value) in overrides {
+                    obj.insert(key, value);
+                }
+            }
+        }
+        None => {
+            rig_req.additional_params = Some(serde_json::Value::Object(overrides));
+        }
+    }
+}
+
 #[async_trait]
 impl<M> LlmProvider for RigAdapter<M>
 where
@@ -862,6 +916,9 @@ where
             self.cache_retention,
         )?;
 
+        if self.enable_ollama_request_overrides {
+            inject_ollama_request_overrides(&mut rig_req, &request.metadata);
+        }
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
         inject_model_override(&mut rig_req, model_override.as_deref());
 
@@ -924,6 +981,9 @@ where
             self.cache_retention,
         )?;
 
+        if self.enable_ollama_request_overrides {
+            inject_ollama_request_overrides(&mut rig_req, &request.metadata);
+        }
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
         inject_model_override(&mut rig_req, model_override.as_deref());
 
@@ -2753,6 +2813,54 @@ mod tests {
         let mut req = make_rig_request(None);
         merge_additional_params(&mut req, None);
         assert!(req.additional_params.is_none());
+    }
+
+    #[test]
+    fn test_inject_ollama_request_overrides_sets_num_ctx_and_think() {
+        let mut req = make_rig_request(None);
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(OLLAMA_NUM_CTX_METADATA_KEY.to_string(), "8192".to_string());
+        metadata.insert(
+            OLLAMA_THINKING_MODE_METADATA_KEY.to_string(),
+            "off".to_string(),
+        );
+
+        inject_ollama_request_overrides(&mut req, &metadata);
+
+        let params = req.additional_params.expect("should inject params");
+        assert_eq!(params["num_ctx"], 8192);
+        assert_eq!(params["think"], false);
+    }
+
+    #[test]
+    fn test_inject_ollama_request_overrides_overwrites_existing_think() {
+        let mut req = make_rig_request(Some(serde_json::json!({ "think": true })));
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            OLLAMA_THINKING_MODE_METADATA_KEY.to_string(),
+            "off".to_string(),
+        );
+
+        inject_ollama_request_overrides(&mut req, &metadata);
+
+        let params = req.additional_params.expect("should keep params");
+        assert_eq!(params["think"], false);
+    }
+
+    #[test]
+    fn test_ollama_per_request_override_wins_over_default_merge() {
+        let mut req = make_rig_request(None);
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            OLLAMA_THINKING_MODE_METADATA_KEY.to_string(),
+            "off".to_string(),
+        );
+
+        inject_ollama_request_overrides(&mut req, &metadata);
+        merge_additional_params(&mut req, Some(&serde_json::json!({ "think": true })));
+
+        let params = req.additional_params.expect("should keep params");
+        assert_eq!(params["think"], false);
     }
 
     #[test]

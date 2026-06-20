@@ -32,6 +32,19 @@ Your previous response was truncated while generating tool call parameters. \
 The tool calls were discarded. Please try a different approach — \
 summarize or transform the data instead of echoing it verbatim in a tool call.";
 
+/// Metadata key used to transport a per-request Ollama context-window override.
+pub const OLLAMA_NUM_CTX_METADATA_KEY: &str = "ollama_num_ctx";
+
+/// Metadata key used to transport a per-request Ollama thinking-mode override.
+pub const OLLAMA_THINKING_MODE_METADATA_KEY: &str = "ollama_thinking_mode";
+
+/// Per-request override for Ollama's `think` option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingModeOverride {
+    On,
+    Off,
+}
+
 /// Seed value used as the second argument to `generate_tool_call_id` when
 /// recovering tool calls from malformed LLM text responses. This must differ
 /// from the `0` seed used in `rig_adapter::normalized_tool_call_id` to avoid
@@ -264,6 +277,10 @@ pub struct ReasoningContext {
     /// 0.7 default in `respond_with_tools`. Per-request temperature from API
     /// callers takes precedence over this.
     pub temperature: Option<f32>,
+    /// Per-request override for Ollama's context window (`num_ctx`).
+    pub num_ctx: Option<u32>,
+    /// Per-request override for Ollama's thinking mode (`think`).
+    pub thinking_mode: Option<ThinkingModeOverride>,
     /// Set by `execute_tool_calls` to indicate whether every tool in the last
     /// batch failed. Used by the duplicate tool call tracker in the agentic loop.
     /// Reset to `false` at the start of each iteration.
@@ -283,6 +300,8 @@ impl ReasoningContext {
             system_prompt: None,
             model_override: None,
             temperature: None,
+            num_ctx: None,
+            thinking_mode: None,
             last_tool_batch_all_failed: false,
         }
     }

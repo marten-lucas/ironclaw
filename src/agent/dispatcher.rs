@@ -23,7 +23,10 @@ use crate::agent::agentic_loop::{
 use crate::generated_images::GeneratedImageSentinel;
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
-use ironclaw_llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
+use ironclaw_llm::{
+    ChatMessage, OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY, Reasoning,
+    ReasoningContext, ThinkingModeOverride, TokenUsage,
+};
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     ironclaw_llm::normalized_model_override(value.as_str()).map(str::to_string)
@@ -79,6 +82,35 @@ fn resolve_temperature_overrides(
         return Some(t);
     }
     resolve_settings_temperature(None, settings_value)
+}
+
+fn resolve_num_ctx_override(current: Option<u32>, metadata: &serde_json::Value) -> Option<u32> {
+    if current.is_some() {
+        return current;
+    }
+    metadata
+        .get("num_ctx")
+        .and_then(|v| v.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn resolve_thinking_mode_override(
+    current: Option<ThinkingModeOverride>,
+    metadata: &serde_json::Value,
+) -> Option<ThinkingModeOverride> {
+    if current.is_some() {
+        return current;
+    }
+    let mode = metadata
+        .get("thinking_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    match mode.as_deref() {
+        Some("on") => Some(ThinkingModeOverride::On),
+        Some("off") => Some(ThinkingModeOverride::Off),
+        _ => None,
+    }
 }
 
 fn chat_job_context(
@@ -692,6 +724,29 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 settings_temperature.as_ref(),
             ) {
                 reason_ctx.temperature = Some(t);
+            }
+
+            if let Some(num_ctx) = resolve_num_ctx_override(reason_ctx.num_ctx, &self.message.metadata)
+            {
+                reason_ctx.num_ctx = Some(num_ctx);
+                reason_ctx.metadata.insert(
+                    OLLAMA_NUM_CTX_METADATA_KEY.to_string(),
+                    num_ctx.to_string(),
+                );
+            }
+
+            if let Some(mode) =
+                resolve_thinking_mode_override(reason_ctx.thinking_mode, &self.message.metadata)
+            {
+                reason_ctx.thinking_mode = Some(mode);
+                let mode_str = match mode {
+                    ThinkingModeOverride::On => "on",
+                    ThinkingModeOverride::Off => "off",
+                };
+                reason_ctx.metadata.insert(
+                    OLLAMA_THINKING_MODE_METADATA_KEY.to_string(),
+                    mode_str.to_string(),
+                );
             }
 
             // Model override: "selected_model" — the same key the /model command
@@ -1907,9 +1962,11 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, resolve_settings_temperature, resolve_temperature_overrides,
+        persist_selected_auth_prompt, resolve_num_ctx_override, resolve_settings_temperature,
+        resolve_temperature_overrides, resolve_thinking_mode_override,
         restore_selected_auth_prompt, selected_model_override,
     };
+    use ironclaw_llm::ThinkingModeOverride;
     use crate::agent::session::PendingAuthPrompt;
     use crate::generated_images::GeneratedImageSentinel;
     use ironclaw_common::ExtensionName;
@@ -3463,6 +3520,69 @@ mod tests {
         assert_eq!(
             selected_model_override(&serde_json::json!("claude-opus-4-6")).as_deref(),
             Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn num_ctx_override_prefers_existing_context_value() {
+        assert_eq!(
+            resolve_num_ctx_override(Some(4096), &serde_json::json!({ "num_ctx": 8192 })),
+            Some(4096),
+        );
+    }
+
+    #[test]
+    fn num_ctx_override_uses_metadata_value_when_available() {
+        assert_eq!(
+            resolve_num_ctx_override(None, &serde_json::json!({ "num_ctx": 8192 })),
+            Some(8192),
+        );
+    }
+
+    #[test]
+    fn num_ctx_override_ignores_invalid_metadata_values() {
+        assert_eq!(resolve_num_ctx_override(None, &serde_json::json!({})), None);
+        assert_eq!(
+            resolve_num_ctx_override(None, &serde_json::json!({ "num_ctx": "large" })),
+            None,
+        );
+    }
+
+    #[test]
+    fn thinking_mode_override_prefers_existing_context_value() {
+        assert_eq!(
+            resolve_thinking_mode_override(
+                Some(ThinkingModeOverride::Off),
+                &serde_json::json!({ "thinking_mode": "on" }),
+            ),
+            Some(ThinkingModeOverride::Off),
+        );
+    }
+
+    #[test]
+    fn thinking_mode_override_reads_metadata_on_and_off() {
+        assert_eq!(
+            resolve_thinking_mode_override(None, &serde_json::json!({ "thinking_mode": "on" })),
+            Some(ThinkingModeOverride::On),
+        );
+        assert_eq!(
+            resolve_thinking_mode_override(
+                None,
+                &serde_json::json!({ "thinking_mode": " OFF " }),
+            ),
+            Some(ThinkingModeOverride::Off),
+        );
+    }
+
+    #[test]
+    fn thinking_mode_override_ignores_auto_and_invalid_values() {
+        assert_eq!(
+            resolve_thinking_mode_override(None, &serde_json::json!({ "thinking_mode": "auto" })),
+            None,
+        );
+        assert_eq!(
+            resolve_thinking_mode_override(None, &serde_json::json!({ "thinking_mode": "maybe" })),
+            None,
         );
     }
 

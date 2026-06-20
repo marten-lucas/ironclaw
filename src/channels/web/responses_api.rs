@@ -78,6 +78,9 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Prefix for response IDs.
 const RESP_PREFIX: &str = "resp_";
 
+/// Maximum accepted per-request `num_ctx` override for Ollama requests.
+const MAX_NUM_CTX: i64 = 262_144;
+
 /// Length of a UUID in simple (no-hyphen) hex form.
 const UUID_HEX_LEN: usize = 32;
 
@@ -100,6 +103,10 @@ pub struct ResponsesRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub num_ctx: Option<i64>,
+    #[serde(default)]
+    pub thinking_mode: Option<String>,
     #[serde(default)]
     pub tools: Option<Vec<ResponsesTool>>,
     #[serde(default)]
@@ -328,6 +335,16 @@ fn api_error(status: StatusCode, message: impl Into<String>, error_type: &str) -
             },
         }),
     )
+}
+
+fn normalize_thinking_mode(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" => Some("auto"),
+        "on" => Some("on"),
+        "off" => Some("off"),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1203,26 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
+    if let Some(num_ctx) = req.num_ctx
+        && !(1..=MAX_NUM_CTX).contains(&num_ctx)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "The 'num_ctx' field must be an integer in [1, {MAX_NUM_CTX}]"
+            ),
+            "invalid_request_error",
+        ));
+    }
+    if let Some(mode) = req.thinking_mode.as_deref()
+        && normalize_thinking_mode(mode).is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'thinking_mode' field must be one of: auto, on, off",
+            "invalid_request_error",
+        ));
+    }
 
     // Caller-supplied tools require engine v2 — the gate machinery that
     // pauses execution and emits `AppEvent::ExternalToolCall` only
@@ -1404,6 +1441,15 @@ pub async fn create_response_handler(
     }
     if let Some(t) = req.temperature {
         metadata["temperature"] = serde_json::json!(t);
+    }
+    if let Some(num_ctx) = req.num_ctx {
+        metadata["num_ctx"] = serde_json::json!(num_ctx);
+    }
+    if let Some(mode) = req.thinking_mode.as_deref()
+        && let Some(normalized) = normalize_thinking_mode(mode)
+        && normalized != "auto"
+    {
+        metadata["thinking_mode"] = serde_json::json!(normalized);
     }
     let msg = crate::channels::web::util::web_incoming_message_with_metadata(
         "gateway",
@@ -3166,5 +3212,28 @@ mod tests {
         let result = format_context(&ctx);
         assert!(result.contains("status"));
         assert!(result.contains("ok"));
+    }
+
+    #[test]
+    fn normalize_thinking_mode_accepts_auto_on_off() {
+        assert_eq!(normalize_thinking_mode("auto"), Some("auto"));
+        assert_eq!(normalize_thinking_mode("on"), Some("on"));
+        assert_eq!(normalize_thinking_mode("off"), Some("off"));
+        assert_eq!(normalize_thinking_mode(" ON "), Some("on"));
+    }
+
+    #[test]
+    fn normalize_thinking_mode_rejects_invalid_values() {
+        assert_eq!(normalize_thinking_mode(""), None);
+        assert_eq!(normalize_thinking_mode("enabled"), None);
+        assert_eq!(normalize_thinking_mode("maybe"), None);
+    }
+
+    #[test]
+    fn num_ctx_bounds_are_as_expected() {
+        assert!(!(1..=MAX_NUM_CTX).contains(&0));
+        assert!((1..=MAX_NUM_CTX).contains(&1));
+        assert!((1..=MAX_NUM_CTX).contains(&MAX_NUM_CTX));
+        assert!(!(1..=MAX_NUM_CTX).contains(&(MAX_NUM_CTX + 1)));
     }
 }
