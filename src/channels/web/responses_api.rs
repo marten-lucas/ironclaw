@@ -74,6 +74,8 @@ use super::platform::state::GatewayState;
 
 /// Maximum time to wait for the agent to finish a turn (non-streaming).
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum allowed per-request timeout override (24h).
+const MAX_RESPONSE_TIMEOUT_SECS: u64 = 86_400;
 
 /// Prefix for response IDs.
 const RESP_PREFIX: &str = "resp_";
@@ -113,6 +115,12 @@ pub struct ResponsesRequest {
     pub num_ctx: Option<i64>,
     #[serde(default)]
     pub thinking_mode: Option<String>,
+    /// IronClaw extension: per-request response timeout in seconds.
+    ///
+    /// - `0`: disable response timeout for this request.
+    /// - `null`/omitted: use server default (`RESPONSE_TIMEOUT`).
+    #[serde(default)]
+    pub timeout_sec: Option<u64>,
     #[serde(default)]
     pub tools: Option<Vec<ResponsesTool>>,
     #[serde(default)]
@@ -372,6 +380,16 @@ fn normalize_thinking_mode(value: &str) -> Option<&'static str> {
         "on" => Some("on"),
         "off" => Some("off"),
         _ => None,
+    }
+}
+
+fn resolve_response_timeout(timeout_sec: Option<u64>) -> Option<Duration> {
+    match timeout_sec {
+        None => Some(RESPONSE_TIMEOUT),
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(
+            secs.min(MAX_RESPONSE_TIMEOUT_SECS),
+        )),
     }
 }
 
@@ -1410,6 +1428,17 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
+    if let Some(timeout_sec) = req.timeout_sec
+        && timeout_sec > MAX_RESPONSE_TIMEOUT_SECS
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "The 'timeout_sec' field exceeds max allowed value ({MAX_RESPONSE_TIMEOUT_SECS})"
+            ),
+            "invalid_request_error",
+        ));
+    }
 
     // Caller-supplied tools require engine v2 — the gate machinery that
     // pauses execution and emits `AppEvent::ExternalToolCall` only
@@ -1615,6 +1644,7 @@ pub async fn create_response_handler(
         let model = request_model.clone();
         let stream = req.stream.unwrap_or(false);
         let user_id = user.user_id.clone();
+        let response_timeout = resolve_response_timeout(req.timeout_sec);
         if stream {
             return handle_streaming(
                 state,
@@ -1624,6 +1654,7 @@ pub async fn create_response_handler(
                 thread_id_str,
                 response_request_id,
                 user_id,
+                response_timeout,
             )
             .await
             .map(IntoResponse::into_response);
@@ -1636,6 +1667,7 @@ pub async fn create_response_handler(
                 thread_id_str,
                 response_request_id,
                 &user_id,
+                response_timeout,
             )
             .await
             .map(IntoResponse::into_response);
@@ -1668,6 +1700,11 @@ pub async fn create_response_handler(
     {
         metadata["thinking_mode"] = serde_json::json!(normalized);
     }
+    metadata["timeout_sec"] = match req.timeout_sec {
+        Some(0) => serde_json::Value::Null,
+        Some(secs) => serde_json::json!(secs.min(MAX_RESPONSE_TIMEOUT_SECS)),
+        None => serde_json::json!(RESPONSE_TIMEOUT.as_secs()),
+    };
     let msg = crate::channels::web::util::web_incoming_message_with_metadata(
         "gateway",
         &user.user_id,
@@ -1679,6 +1716,7 @@ pub async fn create_response_handler(
     let model = request_model;
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
+    let response_timeout = resolve_response_timeout(req.timeout_sec);
 
     if stream {
         handle_streaming(
@@ -1689,6 +1727,7 @@ pub async fn create_response_handler(
             thread_id_str,
             response_request_id,
             user_id,
+            response_timeout,
         )
         .await
         .map(IntoResponse::into_response)
@@ -1702,6 +1741,7 @@ pub async fn create_response_handler(
             response_request_id,
             &user_id,
             req.previous_response_id.is_some(),
+            response_timeout,
         )
         .await
         .map(IntoResponse::into_response)
@@ -1716,6 +1756,7 @@ async fn handle_non_streaming(
     thread_id: String,
     request_id: String,
     user_id: &str,
+    response_timeout: Option<Duration>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     // Subscribe BEFORE sending so we don't miss events.
     let mut event_stream = state
@@ -1733,7 +1774,7 @@ async fn handle_non_streaming(
 
     let mut acc = ResponseAccumulator::new(resp_id.clone(), model);
 
-    let result = tokio::time::timeout(RESPONSE_TIMEOUT, async {
+    let wait_for_completion = async {
         while let Some(event) = event_stream.next().await {
             if !event_matches_response_scope(&event, &thread_id, &request_id, &resp_id) {
                 continue;
@@ -1742,10 +1783,18 @@ async fn handle_non_streaming(
                 break;
             }
         }
-    })
-    .await;
+    };
 
-    if result.is_err() {
+    let timed_out = if let Some(timeout) = response_timeout {
+        tokio::time::timeout(timeout, wait_for_completion)
+            .await
+            .is_err()
+    } else {
+        wait_for_completion.await;
+        false
+    };
+
+    if timed_out {
         acc.failed = true;
         acc.error_message = Some("Response timed out".to_string());
         acc.error_code = Some(RESPONSE_ERROR_CODE_TIMEOUT.to_string());
@@ -1763,6 +1812,7 @@ async fn handle_non_streaming_with_fresh_thread_fallback(
     request_id: String,
     user_id: &str,
     allow_fresh_retry: bool,
+    response_timeout: Option<Duration>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     let first = handle_non_streaming(
         state.clone(),
@@ -1772,6 +1822,7 @@ async fn handle_non_streaming_with_fresh_thread_fallback(
         thread_id,
         request_id,
         user_id,
+        response_timeout,
     )
     .await?;
 
@@ -1807,6 +1858,7 @@ async fn handle_non_streaming_with_fresh_thread_fallback(
         retry_thread_id,
         retry_request_id,
         user_id,
+        response_timeout,
     )
     .await?;
 
@@ -1827,6 +1879,7 @@ async fn handle_streaming(
     thread_id: String,
     request_id: String,
     user_id: String,
+    response_timeout: Option<Duration>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
     let event_stream = state
         .sse
@@ -1851,6 +1904,7 @@ async fn handle_streaming(
         model,
         thread_id,
         request_id,
+        response_timeout,
     ));
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>);
@@ -1866,6 +1920,7 @@ async fn streaming_worker(
     model: String,
     thread_id: String,
     request_id: String,
+    response_timeout: Option<Duration>,
 ) {
     use std::pin::pin;
 
@@ -1898,7 +1953,8 @@ async fn streaming_worker(
     let mut acc = ResponseAccumulator::new(resp_id, model);
     let mut message_output_index: Option<usize> = None;
     let mut event_stream = pin!(event_stream);
-    let timeout = tokio::time::sleep(RESPONSE_TIMEOUT);
+    let mut timed_out = false;
+    let timeout = response_timeout.map(tokio::time::sleep);
     tokio::pin!(timeout);
 
     loop {
@@ -1908,11 +1964,13 @@ async fn streaming_worker(
                 Some(e) => e,
                 None => break,
             },
-            () = &mut timeout => {
-                acc.failed = true;
-                let resp = acc.finish();
-                let _ = emit(&tx, "response.failed", &ResponseStreamEvent::ResponseFailed { response: resp });
-                return;
+            () = async {
+                if let Some(timeout_ref) = timeout.as_mut().as_pin_mut() {
+                    timeout_ref.await;
+                }
+            }, if timeout.as_mut().as_pin_mut().is_some() => {
+                timed_out = true;
+                break;
             }
         };
 
@@ -2316,6 +2374,19 @@ async fn streaming_worker(
             let _ = emit(&tx, evt_type, &evt);
             return;
         }
+    }
+
+    if timed_out {
+        acc.failed = true;
+        acc.error_message = Some("Response timed out".to_string());
+        acc.error_code = Some(RESPONSE_ERROR_CODE_TIMEOUT.to_string());
+        let resp = acc.finish();
+        let _ = emit(
+            &tx,
+            "response.failed",
+            &ResponseStreamEvent::ResponseFailed { response: resp },
+        );
+        return;
     }
 }
 
@@ -3687,6 +3758,24 @@ mod tests {
         assert_eq!(normalize_thinking_mode(""), None);
         assert_eq!(normalize_thinking_mode("enabled"), None);
         assert_eq!(normalize_thinking_mode("maybe"), None);
+    }
+
+    #[test]
+    fn resolve_response_timeout_defaults_to_server_timeout() {
+        let resolved = resolve_response_timeout(None).expect("default timeout");
+        assert_eq!(resolved, RESPONSE_TIMEOUT);
+    }
+
+    #[test]
+    fn resolve_response_timeout_zero_disables_timeout() {
+        assert_eq!(resolve_response_timeout(Some(0)), None);
+    }
+
+    #[test]
+    fn resolve_response_timeout_caps_large_values() {
+        let resolved = resolve_response_timeout(Some(MAX_RESPONSE_TIMEOUT_SECS + 42))
+            .expect("bounded timeout");
+        assert_eq!(resolved.as_secs(), MAX_RESPONSE_TIMEOUT_SECS);
     }
 
     #[test]
