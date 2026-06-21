@@ -113,6 +113,21 @@ fn resolve_thinking_mode_override(
     }
 }
 
+/// Resolve a per-request model override from the inbound message metadata.
+///
+/// The Responses API places a non-default model into `metadata["selected_model"]`
+/// when a caller passes `model: "<model-id>"`. This function lifts that value
+/// into the reasoning context so the LLM layer picks the requested model for
+/// this turn, taking precedence over the user-level settings-store value.
+///
+/// Returns `None` when there is no valid per-request model in metadata, letting
+/// the caller fall through to the settings-store path.
+fn resolve_request_model_override(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("selected_model")
+        .and_then(|v| selected_model_override(v))
+}
+
 fn chat_job_context(
     message: &IncomingMessage,
     thread_id: Uuid,
@@ -749,11 +764,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 );
             }
 
-            // Model override: "selected_model" — the same key the /model command
-            // persists to via SettingsStore (per-user scoped via TenantScope).
-            // Kept separate from temperature precedence — different override
-            // category, only a settings-level signal exists.
-            if let Some(store) = self.tenant.store()
+            // Model override precedence (highest to lowest):
+            //   1. Per-request metadata["selected_model"] — set by the Responses
+            //      API when the caller passes an explicit `model` field.
+            //   2. Settings-store "selected_model" — user or admin default via
+            //      the /model command.
+            if let Some(model) = resolve_request_model_override(&self.message.metadata) {
+                reason_ctx.model_override = Some(model);
+            } else if let Some(store) = self.tenant.store()
                 && let Ok(Some(value)) = store
                     .get_setting_with_admin_fallback("selected_model")
                     .await
@@ -1962,8 +1980,8 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, resolve_num_ctx_override, resolve_settings_temperature,
-        resolve_temperature_overrides, resolve_thinking_mode_override,
+        persist_selected_auth_prompt, resolve_num_ctx_override, resolve_request_model_override,
+        resolve_settings_temperature, resolve_temperature_overrides, resolve_thinking_mode_override,
         restore_selected_auth_prompt, selected_model_override,
     };
     use ironclaw_llm::ThinkingModeOverride;
@@ -3582,6 +3600,52 @@ mod tests {
         );
         assert_eq!(
             resolve_thinking_mode_override(None, &serde_json::json!({ "thinking_mode": "maybe" })),
+            None,
+        );
+    }
+
+    #[test]
+    fn request_model_override_reads_selected_model_from_metadata() {
+        assert_eq!(
+            resolve_request_model_override(
+                &serde_json::json!({ "selected_model": "qwen3.6:27b" })
+            )
+            .as_deref(),
+            Some("qwen3.6:27b"),
+        );
+        assert_eq!(
+            resolve_request_model_override(
+                &serde_json::json!({ "selected_model": "  mistral-nemo:12b  " })
+            )
+            .as_deref(),
+            Some("mistral-nemo:12b"),
+        );
+    }
+
+    #[test]
+    fn request_model_override_ignores_default_sentinel() {
+        assert_eq!(
+            resolve_request_model_override(&serde_json::json!({ "selected_model": "default" })),
+            None,
+        );
+        assert_eq!(
+            resolve_request_model_override(&serde_json::json!({ "selected_model": "DEFAULT" })),
+            None,
+        );
+        assert_eq!(
+            resolve_request_model_override(&serde_json::json!({ "selected_model": "  " })),
+            None,
+        );
+    }
+
+    #[test]
+    fn request_model_override_returns_none_when_key_absent() {
+        assert_eq!(
+            resolve_request_model_override(&serde_json::json!({ "num_ctx": 4096 })),
+            None,
+        );
+        assert_eq!(
+            resolve_request_model_override(&serde_json::json!({})),
             None,
         );
     }

@@ -64,9 +64,9 @@ fn client() -> reqwest::Client {
 }
 
 /// POST `/api/v1/responses` must route to `create_response_handler` —
-/// not 404. We send a deliberately invalid `model` so the handler
-/// short-circuits with 400 before touching the agent loop; the important
-/// assertion is "the route exists".
+/// not 404. We send malformed external tools so validation returns 400
+/// before touching the agent loop; the important assertion is "the route
+/// exists".
 #[tokio::test]
 async fn canonical_post_path_routes_to_handler() {
     let (addr, _state, _guard) = start_test_server().await;
@@ -76,16 +76,16 @@ async fn canonical_post_path_routes_to_handler() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "not-a-real-model",
+            "model": "qwen3.6:27b",
             "input": "hello",
+            "tools": [
+                {"type": "function", "description": "nameless"}
+            ]
         }))
         .send()
         .await
         .expect("POST /api/v1/responses");
 
-    // The handler rejects non-"default" models with 400, which proves the
-    // request reached `create_response_handler` rather than the router's
-    // fallback 404. A 404 here would mean the route isn't registered.
     assert_eq!(
         resp.status(),
         400,
@@ -107,8 +107,11 @@ async fn legacy_post_path_still_routes_to_handler() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "not-a-real-model",
+            "model": "qwen3.6:27b",
             "input": "hello",
+            "tools": [
+                {"type": "function", "description": "nameless"}
+            ]
         }))
         .send()
         .await
@@ -262,12 +265,9 @@ async fn unsupported_tool_type_returns_validation_error() {
 }
 
 /// `instructions` is a per-request system/developer message (OpenAI Responses
-/// API spec). The handler used to reject it with 400; it must now accept it
-/// and route the request into the agent loop. We assert the request clears
-/// the synchronous validation gate by asking for a malformed `model` so the
-/// handler short-circuits with a 400 whose message is about `model`, not
-/// about `instructions`. A 400 mentioning `instructions` would mean the
-/// rejection regressed.
+/// API spec). The handler used to reject it with 400; it must now accept it.
+/// We assert this by pairing valid instructions with malformed external tools
+/// and verifying 400 is about tool validation, not instructions parsing.
 #[tokio::test]
 async fn instructions_field_is_accepted() {
     let (addr, _state, _guard) = start_test_server().await;
@@ -277,9 +277,12 @@ async fn instructions_field_is_accepted() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "not-a-real-model",
+            "model": "qwen3.6:27b",
             "input": "hi",
             "instructions": "You are a terse assistant. Always reply in one sentence.",
+            "tools": [
+                {"type": "function", "description": "nameless"}
+            ]
         }))
         .send()
         .await
@@ -292,8 +295,41 @@ async fn instructions_field_is_accepted() {
         "instructions must no longer be rejected, got: {body}"
     );
     assert!(
-        body.contains("Model selection"),
-        "expected the model rejection to be the reason for 400, got: {body}"
+        body.contains("name"),
+        "expected external tool validation to be the reason for 400, got: {body}"
+    );
+}
+
+/// Non-default models must be accepted at request validation and passed into
+/// the handler path. Since this fixture doesn't initialize engine v2, a plain
+/// request will eventually fail due to the async agent path; the key assertion
+/// is that validation no longer rejects `model` itself.
+#[tokio::test]
+async fn non_default_model_is_not_rejected_by_validation() {
+    let (addr, _state, _guard) = start_test_server().await;
+    let url = format!("http://{}/api/v1/responses", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "qwen3.6:27b",
+            "input": "hello"
+        }))
+        .send()
+        .await
+        .expect("POST /api/v1/responses with non-default model");
+
+    assert_ne!(
+        resp.status(),
+        404,
+        "route must exist and reach handler"
+    );
+
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        !body.contains("Model selection is not yet supported"),
+        "non-default model should no longer be rejected, got: {body}"
     );
 }
 

@@ -138,7 +138,7 @@ print(resp.output_text)
 | Field | Required | Description |
 |-------|----------|-------------|
 | `input` | yes | A string, or an array of `message` / `function_call_output` items. See [External tools](#external-tools) for the array form. |
-| `model` | no | Must be `"default"`. Per-request model override is not yet supported; configure providers via settings. |
+| `model` | no | Optional per-request model override. Omit it (or set `"default"`) to use normal routing; provide a provider model id (for example `"qwen3.6:27b"`) to request that model for this turn. |
 | `instructions` | no | System/developer instructions. Injected ahead of `input` as an `<instructions>` block and stored as part of the persisted user message. See [Per-request instructions](#per-request-instructions) for the IronClaw-specific replay caveat. |
 | `previous_response_id` | no | The `id` from a prior response. Resumes the same thread; see [Session continuity](#session-continuity). |
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
@@ -150,7 +150,8 @@ These fields are rejected with `400` so callers know they were ignored rather th
 - `tool_choice` (no per-request tool surface to enforce against)
 - `temperature` (configure via settings)
 - `max_output_tokens` (not yet wired)
-- Any `model` other than `"default"`
+
+`model` is validated as a non-empty string. Extremely long model identifiers are rejected.
 
 ---
 

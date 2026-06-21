@@ -81,6 +81,9 @@ const RESP_PREFIX: &str = "resp_";
 /// Maximum accepted per-request `num_ctx` override for Ollama requests.
 const MAX_NUM_CTX: i64 = 262_144;
 
+/// Maximum accepted model string length for per-request overrides.
+const MAX_MODEL_NAME_BYTES: usize = 256;
+
 /// Length of a UUID in simple (no-hyphen) hex form.
 const UUID_HEX_LEN: usize = 32;
 
@@ -126,6 +129,28 @@ pub struct ResponsesRequest {
 
 fn default_model() -> String {
     "default".to_string()
+}
+
+fn normalize_requested_model(value: &str) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'model' field must be a non-empty string",
+            "invalid_request_error",
+        ));
+    }
+    if trimmed.len() > MAX_MODEL_NAME_BYTES {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "The 'model' field is too long ({} bytes; max {MAX_MODEL_NAME_BYTES})",
+                trimmed.len()
+            ),
+            "invalid_request_error",
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1102,6 +1127,8 @@ pub async fn create_response_handler(
     super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Json(req): Json<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
+    let request_model = normalize_requested_model(&req.model)?;
+
     if !state.chat_rate_limiter.check(&user.user_id) {
         return Err(api_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -1111,13 +1138,6 @@ pub async fn create_response_handler(
     }
 
     // Reject fields that are accepted but not yet wired into the agent loop.
-    if req.model != "default" {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Model selection is not yet supported; omit 'model' or use \"default\"",
-            "invalid_request_error",
-        ));
-    }
     let external_tools: Vec<ResponsesTool> = req.tools.clone().unwrap_or_default();
     validate_external_tools(&external_tools)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
@@ -1396,6 +1416,9 @@ pub async fn create_response_handler(
             "user_id": &user.user_id,
             "source": "responses_api",
         });
+        if !request_model.eq_ignore_ascii_case("default") {
+            metadata["selected_model"] = serde_json::json!(request_model);
+        }
         if let Some(ref ctx) = req.x_context {
             metadata["context"] = ctx.clone();
         }
@@ -1409,7 +1432,7 @@ pub async fn create_response_handler(
         .with_structured_submission(submission);
 
         let resp_id = encode_response_id(&response_uuid, &thread_uuid);
-        let model = req.model.clone();
+        let model = request_model.clone();
         let stream = req.stream.unwrap_or(false);
         let user_id = user.user_id.clone();
         if stream {
@@ -1436,6 +1459,9 @@ pub async fn create_response_handler(
         "user_id": &user.user_id,
         "source": "responses_api",
     });
+    if !request_model.eq_ignore_ascii_case("default") {
+        metadata["selected_model"] = serde_json::json!(request_model.clone());
+    }
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
     }
@@ -1460,7 +1486,7 @@ pub async fn create_response_handler(
     );
 
     let resp_id = encode_response_id(&response_uuid, &thread_uuid);
-    let model = req.model.clone();
+    let model = request_model;
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
 
