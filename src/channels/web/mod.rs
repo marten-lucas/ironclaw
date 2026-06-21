@@ -759,9 +759,18 @@ impl Channel for GatewayChannel {
 
         self.state.sse.broadcast_for_user(
             &msg.user_id,
-            AppEvent::Response {
-                content: response.content,
-                thread_id,
+            if let Some((request_id, response_id)) = response_scope_from_metadata(&msg.metadata) {
+                AppEvent::ResponseScoped {
+                    content: response.content,
+                    thread_id,
+                    request_id,
+                    response_id,
+                }
+            } else {
+                AppEvent::Response {
+                    content: response.content,
+                    thread_id,
+                }
             },
         );
 
@@ -1061,4 +1070,20 @@ impl Channel for GatewayChannel {
         *self.state.msg_tx.write().await = None;
         Ok(())
     }
+}
+
+fn response_scope_from_metadata(metadata: &serde_json::Value) -> Option<(String, String)> {
+    let request_id = metadata
+        .get("responses_request_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    let response_id = metadata
+        .get("responses_response_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    Some((request_id, response_id))
 }

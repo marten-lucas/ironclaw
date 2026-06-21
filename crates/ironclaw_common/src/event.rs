@@ -201,6 +201,13 @@ impl OnboardingStateDto {
 pub enum AppEvent {
     #[serde(rename = "response")]
     Response { content: String, thread_id: String },
+    #[serde(rename = "response_scoped")]
+    ResponseScoped {
+        content: String,
+        thread_id: String,
+        request_id: String,
+        response_id: String,
+    },
     #[serde(rename = "thinking")]
     Thinking {
         message: String,
@@ -718,6 +725,7 @@ impl AppEvent {
     pub fn event_type(&self) -> &'static str {
         match self {
             Self::Response { .. } => "response",
+            Self::ResponseScoped { .. } => "response_scoped",
             Self::Thinking { .. } => "thinking",
             Self::ToolStarted { .. } => "tool_started",
             Self::ToolCompleted { .. } => "tool_completed",
@@ -787,6 +795,12 @@ mod tests {
             AppEvent::Response {
                 content: String::new(),
                 thread_id: String::new(),
+            },
+            AppEvent::ResponseScoped {
+                content: String::new(),
+                thread_id: String::new(),
+                request_id: String::new(),
+                response_id: String::new(),
             },
             AppEvent::Thinking {
                 message: String::new(),

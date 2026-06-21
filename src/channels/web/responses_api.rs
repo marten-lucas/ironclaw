@@ -759,6 +759,7 @@ fn is_synthetic_engine_action(name: &str) -> bool {
 fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
     match event {
         AppEvent::Response { thread_id, .. } => thread_id == target,
+        AppEvent::ResponseScoped { thread_id, .. } => thread_id == target,
         AppEvent::StreamChunk { thread_id, .. }
         | AppEvent::Thinking { thread_id, .. }
         | AppEvent::ToolStarted { thread_id, .. }
@@ -776,6 +777,70 @@ fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
         | AppEvent::ExternalToolCall { thread_id, .. } => thread_id.as_deref() == Some(target),
         // Global or job-scoped events are never matched.
         _ => false,
+    }
+}
+
+fn event_matches_response_scope(
+    event: &AppEvent,
+    thread_id: &str,
+    request_id: &str,
+    response_id: &str,
+) -> bool {
+    match event {
+        AppEvent::ResponseScoped {
+            thread_id: event_thread_id,
+            request_id: event_request_id,
+            response_id: event_response_id,
+            ..
+        } => {
+            event_thread_id == thread_id
+                && event_request_id == request_id
+                && event_response_id == response_id
+        }
+        // Plain `response` events can be emitted by non-Responses flows
+        // on the same thread. Ignore them when scope-aware matching is active.
+        AppEvent::Response { .. } => false,
+        _ => event_matches_thread(event, thread_id),
+    }
+}
+
+fn extract_conversation_title(ctx: Option<&serde_json::Value>) -> Option<String> {
+    let raw = ctx
+        .and_then(|c| c.get("conversation"))
+        .and_then(|c| c.get("title").or_else(|| c.get("label")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+
+    Some(raw.chars().take(120).collect())
+}
+
+async fn persist_conversation_title_if_present(
+    state: &GatewayState,
+    user_id: &str,
+    thread_id: &str,
+    thread_uuid: Uuid,
+    title: Option<&str>,
+) {
+    let Some(title) = title else {
+        return;
+    };
+    let Some(store) = state.store.as_ref() else {
+        return;
+    };
+
+    if store
+        .get_or_create_scoped_conversation(user_id, "gateway", thread_id)
+        .await
+        .is_ok()
+    {
+        let _ = store
+            .update_conversation_metadata_field(
+                thread_uuid,
+                "title",
+                &serde_json::json!(title),
+            )
+            .await;
     }
 }
 
@@ -854,6 +919,22 @@ impl ResponseAccumulator {
             }
             AppEvent::Response { content, .. } => {
                 // Final response text supersedes any stream chunks.
+                let text = if content.is_empty() {
+                    self.text_chunks.join("")
+                } else {
+                    content
+                };
+                if !text.is_empty() {
+                    self.output.push(ResponseOutputItem::Message {
+                        id: make_item_id(),
+                        role: "assistant".to_string(),
+                        content: vec![MessageContent::OutputText { text }],
+                    });
+                }
+                true // turn complete
+            }
+            AppEvent::ResponseScoped { content, .. } => {
+                // Final scoped response text supersedes any stream chunks.
                 let text = if content.is_empty() {
                     self.text_chunks.join("")
                 } else {
@@ -1310,6 +1391,18 @@ pub async fn create_response_handler(
 
     // Each POST gets its own unique response UUID.
     let response_uuid = Uuid::new_v4();
+    let response_request_id = response_uuid.to_string();
+    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
+    let conversation_title = extract_conversation_title(req.x_context.as_ref());
+
+    persist_conversation_title_if_present(
+        &state,
+        &user.user_id,
+        &thread_id_str,
+        thread_uuid,
+        conversation_title.as_deref(),
+    )
+    .await;
 
     // Register caller-supplied tools in the engine's per-thread external
     // tool catalog. The engine's `EffectBridgeAdapter` consults this on
@@ -1415,6 +1508,8 @@ pub async fn create_response_handler(
             "thread_id": &thread_id_str,
             "user_id": &user.user_id,
             "source": "responses_api",
+            "responses_request_id": &response_request_id,
+            "responses_response_id": &resp_id,
         });
         if !request_model.eq_ignore_ascii_case("default") {
             metadata["selected_model"] = serde_json::json!(request_model);
@@ -1431,14 +1526,21 @@ pub async fn create_response_handler(
         )
         .with_structured_submission(submission);
 
-        let resp_id = encode_response_id(&response_uuid, &thread_uuid);
         let model = request_model.clone();
         let stream = req.stream.unwrap_or(false);
         let user_id = user.user_id.clone();
         if stream {
-            return handle_streaming(state, resume_msg, resp_id, model, thread_id_str, user_id)
-                .await
-                .map(IntoResponse::into_response);
+            return handle_streaming(
+                state,
+                resume_msg,
+                resp_id,
+                model,
+                thread_id_str,
+                response_request_id,
+                user_id,
+            )
+            .await
+            .map(IntoResponse::into_response);
         } else {
             return handle_non_streaming(
                 state,
@@ -1446,6 +1548,7 @@ pub async fn create_response_handler(
                 resp_id,
                 model,
                 thread_id_str,
+                response_request_id,
                 &user_id,
             )
             .await
@@ -1458,6 +1561,8 @@ pub async fn create_response_handler(
         "thread_id": &thread_id_str,
         "user_id": &user.user_id,
         "source": "responses_api",
+        "responses_request_id": &response_request_id,
+        "responses_response_id": &resp_id,
     });
     if !request_model.eq_ignore_ascii_case("default") {
         metadata["selected_model"] = serde_json::json!(request_model.clone());
@@ -1485,19 +1590,34 @@ pub async fn create_response_handler(
         metadata,
     );
 
-    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = request_model;
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
 
     if stream {
-        handle_streaming(state, msg, resp_id, model, thread_id_str, user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            response_request_id,
+            user_id,
+        )
+        .await
+        .map(IntoResponse::into_response)
     } else {
-        handle_non_streaming(state, msg, resp_id, model, thread_id_str, &user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_non_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            response_request_id,
+            &user_id,
+        )
+        .await
+        .map(IntoResponse::into_response)
     }
 }
 
@@ -1507,6 +1627,7 @@ async fn handle_non_streaming(
     resp_id: String,
     model: String,
     thread_id: String,
+    request_id: String,
     user_id: &str,
 ) -> Result<Json<ResponseObject>, ApiError> {
     // Subscribe BEFORE sending so we don't miss events.
@@ -1523,11 +1644,11 @@ async fn handle_non_streaming(
 
     send_to_agent(&state, msg).await?;
 
-    let mut acc = ResponseAccumulator::new(resp_id, model);
+    let mut acc = ResponseAccumulator::new(resp_id.clone(), model);
 
     let result = tokio::time::timeout(RESPONSE_TIMEOUT, async {
         while let Some(event) = event_stream.next().await {
-            if !event_matches_thread(&event, &thread_id) {
+            if !event_matches_response_scope(&event, &thread_id, &request_id, &resp_id) {
                 continue;
             }
             if acc.process(event) {
@@ -1551,6 +1672,7 @@ async fn handle_streaming(
     resp_id: String,
     model: String,
     thread_id: String,
+    request_id: String,
     user_id: String,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
     let event_stream = state
@@ -1575,6 +1697,7 @@ async fn handle_streaming(
         resp_id,
         model,
         thread_id,
+        request_id,
     ));
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>);
@@ -1589,6 +1712,7 @@ async fn streaming_worker(
     resp_id: String,
     model: String,
     thread_id: String,
+    request_id: String,
 ) {
     use std::pin::pin;
 
@@ -1639,7 +1763,7 @@ async fn streaming_worker(
             }
         };
 
-        if !event_matches_thread(&event, &thread_id) {
+        if !event_matches_response_scope(&event, &thread_id, &request_id, &acc.resp_id) {
             continue;
         }
 
@@ -1925,13 +2049,18 @@ async fn streaming_worker(
         let is_terminal = matches!(
             &event,
             AppEvent::Response { .. }
+                | AppEvent::ResponseScoped { .. }
                 | AppEvent::Error { .. }
                 | AppEvent::ApprovalNeeded { .. }
                 | AppEvent::GateRequired { .. }
         );
 
         if is_terminal {
-            if let AppEvent::Response { content, .. } = &event {
+            if let Some(content) = match &event {
+                AppEvent::Response { content, .. } => Some(content),
+                AppEvent::ResponseScoped { content, .. } => Some(content),
+                _ => None,
+            } {
                 let text = if content.is_empty() {
                     acc.text_chunks.join("")
                 } else {
@@ -2636,6 +2765,7 @@ mod tests {
             "resp_stream_test".to_string(),
             "test-model".to_string(),
             thread_id.clone(),
+            "request-stream-test".to_string(),
         ));
 
         // Two text deltas, then the external-tool gate fires.
@@ -2813,6 +2943,7 @@ mod tests {
             "resp_empty_test".to_string(),
             "test-model".to_string(),
             thread_id.clone(),
+            "request-empty-test".to_string(),
         ));
 
         // An empty StreamChunk creates the Message item but contributes
@@ -2828,9 +2959,11 @@ mod tests {
         // Terminal Response with empty content. With the buggy gate
         // (`!text.is_empty()`), the entire finalize block was skipped.
         input_tx
-            .send(AppEvent::Response {
+            .send(AppEvent::ResponseScoped {
                 content: String::new(),
                 thread_id: thread_id.clone(),
+                request_id: "request-empty-test".to_string(),
+                response_id: "resp_empty_test".to_string(),
             })
             .await
             .unwrap();
@@ -2895,6 +3028,65 @@ mod tests {
 
         let global = AppEvent::Heartbeat;
         assert!(!event_matches_thread(&global, target));
+    }
+
+    #[test]
+    fn event_matches_response_scope_filters_parallel_same_thread_responses() {
+        let thread_id = "thread-1";
+        let request_id = "req-target";
+        let response_id = "resp_target";
+
+        let matching = AppEvent::ResponseScoped {
+            content: "target".to_string(),
+            thread_id: thread_id.to_string(),
+            request_id: request_id.to_string(),
+            response_id: response_id.to_string(),
+        };
+        assert!(event_matches_response_scope(
+            &matching,
+            thread_id,
+            request_id,
+            response_id
+        ));
+
+        let wrong_request = AppEvent::ResponseScoped {
+            content: "other".to_string(),
+            thread_id: thread_id.to_string(),
+            request_id: "req-other".to_string(),
+            response_id: response_id.to_string(),
+        };
+        assert!(!event_matches_response_scope(
+            &wrong_request,
+            thread_id,
+            request_id,
+            response_id
+        ));
+
+        let plain_response = AppEvent::Response {
+            content: "legacy".to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        assert!(!event_matches_response_scope(
+            &plain_response,
+            thread_id,
+            request_id,
+            response_id
+        ));
+    }
+
+    #[test]
+    fn accumulator_accepts_scoped_response_terminal_event() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+        let done = acc.process(AppEvent::ResponseScoped {
+            content: "Scoped hello".to_string(),
+            thread_id: "t".to_string(),
+            request_id: "req-1".to_string(),
+            response_id: "resp_test".to_string(),
+        });
+        assert!(done);
+        let resp = acc.finish();
+        assert_eq!(resp.status, ResponseStatus::Completed);
+        assert_eq!(resp.output.len(), 1);
     }
 
     #[test]

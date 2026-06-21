@@ -1837,7 +1837,11 @@ impl Store {
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let sql_title: Option<String> = r.get("title");
-                let title = sql_title.or_else(|| {
+                let metadata_title = metadata
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let title = metadata_title.or(sql_title).or_else(|| {
                     metadata
                         .get("routine_name")
                         .and_then(|v| v.as_str())
@@ -1911,7 +1915,11 @@ impl Store {
                 // For routine/heartbeat threads, derive title from metadata
                 // since they may have no user messages.
                 let sql_title: Option<String> = r.get("title");
-                let title = sql_title.or_else(|| {
+                let metadata_title = metadata
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let title = metadata_title.or(sql_title).or_else(|| {
                     metadata
                         .get("routine_name")
                         .and_then(|v| v.as_str())

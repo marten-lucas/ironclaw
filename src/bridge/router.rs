@@ -1480,6 +1480,22 @@ async fn resolve_v1_conversation_for_message(
         .await
 }
 
+fn response_scope_from_metadata(metadata: &serde_json::Value) -> Option<(String, String)> {
+    let request_id = metadata
+        .get("responses_request_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    let response_id = metadata
+        .get("responses_response_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?
+        .to_string();
+    Some((request_id, response_id))
+}
+
 async fn reconcile_pending_gate_state(
     store: &Arc<dyn Store>,
     pending_gates: &crate::gate::store::PendingGateStore,
@@ -5178,9 +5194,19 @@ fn spawn_post_park_continuation(
                 sse.broadcast_for_user(
                     // projection-exempt: bridge dispatcher, post-park final response
                     &user_id,
-                    AppEvent::Response {
-                        content: text.clone(),
-                        thread_id: tid_str.clone(),
+                    if let Some((request_id, response_id)) = response_scope_from_metadata(&metadata)
+                    {
+                        AppEvent::ResponseScoped {
+                            content: text.clone(),
+                            thread_id: tid_str.clone(),
+                            request_id,
+                            response_id,
+                        }
+                    } else {
+                        AppEvent::Response {
+                            content: text.clone(),
+                            thread_id: tid_str.clone(),
+                        }
                     },
                 );
             }
@@ -5489,9 +5515,19 @@ async fn await_thread_outcome(
     {
         sse.broadcast_for_user(
             &message.user_id,
-            AppEvent::Response {
-                content: text.clone(),
-                thread_id: thread_id.to_string(),
+            if let Some((request_id, response_id)) = response_scope_from_metadata(&message.metadata)
+            {
+                AppEvent::ResponseScoped {
+                    content: text.clone(),
+                    thread_id: thread_id.to_string(),
+                    request_id,
+                    response_id,
+                }
+            } else {
+                AppEvent::Response {
+                    content: text.clone(),
+                    thread_id: thread_id.to_string(),
+                }
             },
         );
     }
