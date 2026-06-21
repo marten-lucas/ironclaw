@@ -87,6 +87,9 @@ const MAX_MODEL_NAME_BYTES: usize = 256;
 /// Length of a UUID in simple (no-hyphen) hex form.
 const UUID_HEX_LEN: usize = 32;
 
+/// Stable error code used when non-streaming response collection times out.
+const RESPONSE_ERROR_CODE_TIMEOUT: &str = "response_timeout";
+
 // ---------------------------------------------------------------------------
 // Request types
 // ---------------------------------------------------------------------------
@@ -804,6 +807,87 @@ fn event_matches_response_scope(
     }
 }
 
+fn is_timeout_failure_response(response: &ResponseObject) -> bool {
+    if response.status != ResponseStatus::Failed {
+        return false;
+    }
+
+    let Some(error) = response.error.as_ref() else {
+        return false;
+    };
+
+    matches!(error.code.as_deref(), Some(RESPONSE_ERROR_CODE_TIMEOUT))
+        || error.message == "Response timed out"
+}
+
+fn retarget_message_for_fresh_thread(
+    msg: IncomingMessage,
+    thread_id: &str,
+    request_id: &str,
+    response_id: &str,
+) -> IncomingMessage {
+    let msg = msg.with_thread(thread_id.to_string());
+    let mut metadata = msg.metadata.clone();
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    if let Some(obj) = metadata.as_object_mut() {
+        let previous_thread_id = obj
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let previous_request_id = obj
+            .get("responses_request_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let previous_response_id = obj
+            .get("responses_response_id")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let retry_attempt = obj
+            .get("responses_retry_attempt")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            + 1;
+
+        obj.insert("thread_id".to_string(), serde_json::json!(thread_id));
+        obj.insert("responses_request_id".to_string(), serde_json::json!(request_id));
+        obj.insert("responses_response_id".to_string(), serde_json::json!(response_id));
+        obj.insert(
+            "responses_retry_attempt".to_string(),
+            serde_json::json!(retry_attempt),
+        );
+        obj.insert(
+            "responses_retry_reason".to_string(),
+            serde_json::json!("fresh_thread_after_timeout"),
+        );
+        obj.insert(
+            "responses_retry_trigger_code".to_string(),
+            serde_json::json!(RESPONSE_ERROR_CODE_TIMEOUT),
+        );
+
+        if let Some(value) = previous_thread_id {
+            obj.insert(
+                "responses_retry_previous_thread_id".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(value) = previous_request_id {
+            obj.insert(
+                "responses_retry_previous_request_id".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(value) = previous_response_id {
+            obj.insert(
+                "responses_retry_previous_response_id".to_string(),
+                serde_json::json!(value),
+            );
+        }
+    }
+    msg.with_metadata(metadata)
+}
+
 fn extract_conversation_title(ctx: Option<&serde_json::Value>) -> Option<String> {
     let raw = ctx
         .and_then(|c| c.get("conversation"))
@@ -894,6 +978,7 @@ struct ResponseAccumulator {
     usage: ResponseUsage,
     failed: bool,
     error_message: Option<String>,
+    error_code: Option<String>,
 }
 
 impl ResponseAccumulator {
@@ -907,6 +992,7 @@ impl ResponseAccumulator {
             usage: ResponseUsage::default(),
             failed: false,
             error_message: None,
+            error_code: None,
         }
     }
 
@@ -1193,7 +1279,7 @@ impl ResponseAccumulator {
             usage: self.usage,
             error: self.error_message.map(|msg| ResponseError {
                 message: msg,
-                code: None,
+                code: self.error_code,
             }),
         }
     }
@@ -1607,7 +1693,7 @@ pub async fn create_response_handler(
         .await
         .map(IntoResponse::into_response)
     } else {
-        handle_non_streaming(
+        handle_non_streaming_with_fresh_thread_fallback(
             state,
             msg,
             resp_id,
@@ -1615,6 +1701,7 @@ pub async fn create_response_handler(
             thread_id_str,
             response_request_id,
             &user_id,
+            req.previous_response_id.is_some(),
         )
         .await
         .map(IntoResponse::into_response)
@@ -1661,9 +1748,75 @@ async fn handle_non_streaming(
     if result.is_err() {
         acc.failed = true;
         acc.error_message = Some("Response timed out".to_string());
+        acc.error_code = Some(RESPONSE_ERROR_CODE_TIMEOUT.to_string());
     }
 
     Ok(Json(acc.finish()))
+}
+
+async fn handle_non_streaming_with_fresh_thread_fallback(
+    state: Arc<GatewayState>,
+    msg: IncomingMessage,
+    resp_id: String,
+    model: String,
+    thread_id: String,
+    request_id: String,
+    user_id: &str,
+    allow_fresh_retry: bool,
+) -> Result<Json<ResponseObject>, ApiError> {
+    let first = handle_non_streaming(
+        state.clone(),
+        msg.clone(),
+        resp_id,
+        model.clone(),
+        thread_id,
+        request_id,
+        user_id,
+    )
+    .await?;
+
+    if !allow_fresh_retry || !is_timeout_failure_response(&first.0) {
+        return Ok(first);
+    }
+
+    let retry_thread_uuid = Uuid::new_v4();
+    let retry_thread_id = retry_thread_uuid.to_string();
+    let retry_response_uuid = Uuid::new_v4();
+    let retry_request_id = retry_response_uuid.to_string();
+    let retry_resp_id = encode_response_id(&retry_response_uuid, &retry_thread_uuid);
+    let retry_msg = retarget_message_for_fresh_thread(
+        msg,
+        &retry_thread_id,
+        &retry_request_id,
+        &retry_resp_id,
+    );
+
+    tracing::info!(
+        thread_id = %retry_thread_id,
+        request_id = %retry_request_id,
+        response_id = %retry_resp_id,
+        trigger_code = RESPONSE_ERROR_CODE_TIMEOUT,
+        "responses_api non-streaming fallback retry on fresh thread"
+    );
+
+    let retry = handle_non_streaming(
+        state,
+        retry_msg,
+        retry_resp_id,
+        model,
+        retry_thread_id,
+        retry_request_id,
+        user_id,
+    )
+    .await?;
+
+    tracing::info!(
+        status = ?retry.0.status,
+        fallback_used = true,
+        "responses_api non-streaming fallback retry completed"
+    );
+
+    Ok(retry)
 }
 
 async fn handle_streaming(
@@ -3087,6 +3240,95 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.status, ResponseStatus::Completed);
         assert_eq!(resp.output.len(), 1);
+    }
+
+    #[test]
+    fn timeout_failure_response_is_detected_for_fresh_thread_retry() {
+        let response = ResponseObject {
+            id: "resp_test".to_string(),
+            object: "response",
+            created_at: 0,
+            model: "m".to_string(),
+            status: ResponseStatus::Failed,
+            output: Vec::new(),
+            usage: ResponseUsage::default(),
+            error: Some(ResponseError {
+                message: "Response timed out".to_string(),
+                code: Some(RESPONSE_ERROR_CODE_TIMEOUT.to_string()),
+            }),
+        };
+
+        assert!(is_timeout_failure_response(&response));
+    }
+
+    #[test]
+    fn retarget_message_for_fresh_thread_updates_metadata_and_thread() {
+        let msg = crate::channels::web::util::web_incoming_message_with_metadata(
+            "gateway",
+            "user-1",
+            "hello",
+            Some("old-thread"),
+            serde_json::json!({
+                "thread_id": "old-thread",
+                "responses_request_id": "req-old",
+                "responses_response_id": "resp-old",
+                "responses_retry_attempt": 1
+            }),
+        );
+
+        let retargeted = retarget_message_for_fresh_thread(
+            msg,
+            "new-thread",
+            "req-new",
+            "resp-new",
+        );
+
+        assert_eq!(retargeted.thread_id.as_ref().map(|t| t.as_str()), Some("new-thread"));
+        assert_eq!(retargeted.metadata.get("thread_id").and_then(|v| v.as_str()), Some("new-thread"));
+        assert_eq!(retargeted.metadata.get("responses_request_id").and_then(|v| v.as_str()), Some("req-new"));
+        assert_eq!(retargeted.metadata.get("responses_response_id").and_then(|v| v.as_str()), Some("resp-new"));
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_retry_reason")
+                .and_then(|v| v.as_str()),
+            Some("fresh_thread_after_timeout")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_retry_trigger_code")
+                .and_then(|v| v.as_str()),
+            Some(RESPONSE_ERROR_CODE_TIMEOUT)
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_retry_previous_thread_id")
+                .and_then(|v| v.as_str()),
+            Some("old-thread")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_retry_previous_request_id")
+                .and_then(|v| v.as_str()),
+            Some("req-old")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_retry_previous_response_id")
+                .and_then(|v| v.as_str()),
+            Some("resp-old")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_retry_attempt")
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
     }
 
     #[test]
