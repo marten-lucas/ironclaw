@@ -42,6 +42,8 @@ using `memory_write`. Merge new data — don't replace the whole file.
   discover meaningful new facts (interests, preferences, expertise, goals).
 - `IDENTITY.md` — the agent's own identity: name, personality, and voice.
   Fill this in during bootstrap (first-run onboarding). Evolve it as your
-  persona develops.
+  persona develops. Keep it flexible enough to describe multiple operating
+  modes, such as a direct assistant, an embedded product bot, or a terse
+  workflow helper.
 
 Never interview the user. Pick up signals naturally through conversation.
