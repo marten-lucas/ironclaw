@@ -136,6 +136,16 @@ pub struct ResponsesRequest {
     /// nested objects are serialized as raw JSON. Max 10 KB.
     #[serde(default, alias = "context")]
     pub x_context: Option<serde_json::Value>,
+    /// IronClaw extension: keep `x_context` in request metadata but do not
+    /// prepend it into the model prompt as a `<user-context>` block.
+    ///
+    /// Default: `false` / omitted, preserving the standard IronClaw behavior.
+    #[serde(default)]
+    pub suppress_user_context: Option<bool>,
+}
+
+fn should_prepend_user_context(suppress_user_context: Option<bool>) -> bool {
+    !suppress_user_context.unwrap_or(false)
 }
 
 fn default_model() -> String {
@@ -788,6 +798,7 @@ fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
         | AppEvent::ToolResult { thread_id, .. }
         | AppEvent::Error { thread_id, .. }
         | AppEvent::TurnCost { thread_id, .. }
+        | AppEvent::TurnMetrics { thread_id, .. }
         | AppEvent::ImageGenerated { thread_id, .. }
         | AppEvent::Suggestions { thread_id, .. }
         | AppEvent::ReasoningUpdate { thread_id, .. }
@@ -1160,6 +1171,13 @@ impl ResponseAccumulator {
                 self.usage.add_turn_cost(input_tokens, output_tokens);
                 false
             }
+            AppEvent::TurnMetrics { model, .. } => {
+                let normalized = model.trim();
+                if !normalized.is_empty() {
+                    self.model = normalized.to_string();
+                }
+                false
+            }
             AppEvent::Error { message, .. } => {
                 self.failed = true;
                 self.error_message = Some(message);
@@ -1477,8 +1495,10 @@ pub async fn create_response_handler(
                 "invalid_request_error",
             ));
         }
-        let prefix = format_context(ctx);
-        content = format!("<user-context>\n{prefix}\n</user-context>\n\n{content}");
+        if should_prepend_user_context(req.suppress_user_context) {
+            let prefix = format_context(ctx);
+            content = format!("<user-context>\n{prefix}\n</user-context>\n\n{content}");
+        }
     }
 
     // Prepend per-request instructions. Per the OpenAI Responses API spec,
@@ -2565,6 +2585,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn user_context_prepending_is_enabled_by_default() {
+        assert!(should_prepend_user_context(None));
+        assert!(should_prepend_user_context(Some(false)));
+    }
+
+    #[test]
+    fn user_context_prepending_can_be_suppressed() {
+        assert!(!should_prepend_user_context(Some(true)));
+    }
+
+    #[test]
     fn response_id_round_trip() {
         let resp_uuid = Uuid::new_v4();
         let thread_uuid = Uuid::new_v4();
@@ -3252,6 +3283,17 @@ mod tests {
 
         let global = AppEvent::Heartbeat;
         assert!(!event_matches_thread(&global, target));
+
+        let turn_metrics = AppEvent::TurnMetrics {
+            thread_id: Some(target.to_string()),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            model: "qwen3.6:27b".to_string(),
+            duration_ms: 15,
+            iteration: 1,
+        };
+        assert!(event_matches_thread(&turn_metrics, target));
     }
 
     #[test]
@@ -3311,6 +3353,31 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.status, ResponseStatus::Completed);
         assert_eq!(resp.output.len(), 1);
+    }
+
+    #[test]
+    fn accumulator_uses_turn_metrics_model_as_effective_response_model() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "requested-model".to_string());
+        let done = acc.process(AppEvent::TurnMetrics {
+            thread_id: Some("t".to_string()),
+            input_tokens: 5,
+            output_tokens: 7,
+            cache_read_tokens: 0,
+            model: "effective-model".to_string(),
+            duration_ms: 10,
+            iteration: 1,
+        });
+        assert!(!done);
+
+        let _ = acc.process(AppEvent::ResponseScoped {
+            content: "ok".to_string(),
+            thread_id: "t".to_string(),
+            request_id: "req-1".to_string(),
+            response_id: "resp_test".to_string(),
+        });
+
+        let resp = acc.finish();
+        assert_eq!(resp.model, "effective-model");
     }
 
     #[test]

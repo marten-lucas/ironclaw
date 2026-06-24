@@ -785,31 +785,29 @@ fn build_rig_request(
     })
 }
 
-/// Inject a per-request model override into the rig request's `additional_params`.
+/// Enforce strict model selection semantics for rig-based providers.
 ///
-/// Rig-core bakes the model name at construction time inside each provider's
-/// `CompletionModel` implementation. This helper inserts a top-level `"model"`
-/// key into `additional_params`, which rig-core flattens into the provider's
-/// request payload via `#[serde(flatten)]`.
-///
-/// Whether the override takes effect depends on the downstream API server's
-/// handling of duplicate JSON keys (most Python/Go servers use last-key-wins,
-/// but this is not guaranteed by the JSON spec). The `effective_model_name()`
-/// trait method should be consulted to determine the model actually used.
-fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
-    let Some(model) = model_override else {
-        return;
+/// Rig models are pinned at construction time and do not support reliable
+/// per-request model switching. Returning an explicit error avoids silent
+/// fallback to the configured model when callers request a different one.
+fn enforce_requested_model_for_rig_provider(
+    active_model: &str,
+    requested_model: Option<&str>,
+) -> Result<(), LlmError> {
+    let Some(requested) = requested_model else {
+        return Ok(());
     };
-    match rig_req.additional_params {
-        Some(ref mut params) => {
-            if let Some(obj) = params.as_object_mut() {
-                obj.insert("model".to_string(), serde_json::json!(model));
-            }
-        }
-        None => {
-            rig_req.additional_params = Some(serde_json::json!({ "model": model }));
-        }
+
+    if requested == active_model {
+        return Ok(());
     }
+
+    Err(LlmError::RequestFailed {
+        provider: "rig".to_string(),
+        reason: format!(
+            "Per-request model override is not supported for rig-based providers (requested '{requested}', active '{active_model}'). Configure the provider with the requested model instead."
+        ),
+    })
 }
 
 fn inject_ollama_request_overrides(
@@ -899,6 +897,7 @@ where
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
         let model_override = request.take_model_override();
+        enforce_requested_model_for_rig_provider(&self.model_name, model_override.as_deref())?;
 
         self.strip_unsupported_completion_params(&mut request);
 
@@ -920,7 +919,6 @@ where
             inject_ollama_request_overrides(&mut rig_req, &request.metadata);
         }
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
-        inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response = self
             .model
@@ -959,6 +957,7 @@ where
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let model_override = request.take_model_override();
+        enforce_requested_model_for_rig_provider(&self.model_name, model_override.as_deref())?;
 
         self.strip_unsupported_tool_params(&mut request);
 
@@ -985,7 +984,6 @@ where
             inject_ollama_request_overrides(&mut rig_req, &request.metadata);
         }
         merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
-        inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response = self
             .model
@@ -2864,37 +2862,33 @@ mod tests {
     }
 
     #[test]
-    fn test_inject_model_override_creates_params_when_none() {
-        let mut req = make_rig_request(None);
-        inject_model_override(&mut req, Some("test-model"));
-
-        let params = req
-            .additional_params
-            .expect("additional_params should be Some");
-        assert_eq!(params, serde_json::json!({ "model": "test-model" }));
+    fn test_enforce_requested_model_for_rig_provider_accepts_no_override() {
+        let result = enforce_requested_model_for_rig_provider("qwen3.6:27b", None);
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_inject_model_override_preserves_existing_params() {
-        let mut req = make_rig_request(Some(serde_json::json!({
-            "cache_control": { "type": "ephemeral" },
-        })));
-        inject_model_override(&mut req, Some("override-model"));
+    fn test_enforce_requested_model_for_rig_provider_accepts_matching_override() {
+        let result =
+            enforce_requested_model_for_rig_provider("qwen3.6:27b", Some("qwen3.6:27b"));
+        assert!(result.is_ok());
+    }
 
-        let params = req.additional_params.expect("should remain Some");
-        let obj = params.as_object().expect("should be object");
-        assert_eq!(
-            obj.get("cache_control"),
-            Some(&serde_json::json!({ "type": "ephemeral" }))
+    #[test]
+    fn test_enforce_requested_model_for_rig_provider_rejects_mismatch() {
+        let result = enforce_requested_model_for_rig_provider(
+            "mistral-nemo:12b",
+            Some("qwen3.6:27b"),
         );
-        assert_eq!(obj.get("model"), Some(&serde_json::json!("override-model")));
-    }
 
-    #[test]
-    fn test_inject_model_override_noop_when_none() {
-        let mut req = make_rig_request(None);
-        inject_model_override(&mut req, None);
-        assert!(req.additional_params.is_none());
+        match result {
+            Err(LlmError::RequestFailed { provider, reason }) => {
+                assert_eq!(provider, "rig");
+                assert!(reason.contains("requested 'qwen3.6:27b'"));
+                assert!(reason.contains("active 'mistral-nemo:12b'"));
+            }
+            other => panic!("expected RequestFailed error, got {other:?}"),
+        }
     }
 
     // ── map_rig_error: context length detection ─────────────────────────

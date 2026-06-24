@@ -144,6 +144,7 @@ print(resp.output_text)
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
 | `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). |
 | `x_context` | no | IronClaw extension. Structured JSON context (≤ 10 KB) prepended as `<user-context>`. The alias `context` is also accepted but may collide with future OpenAI fields. Prefer `x_context`. |
+| `suppress_user_context` | no | IronClaw extension. When `true`, keeps `x_context` in request metadata but skips prepending it into the model prompt as `<user-context>`. Default `false`. |
 
 These fields are rejected with `400` so callers know they were ignored rather than silently dropped:
 
@@ -342,6 +343,8 @@ For integrations that need to pass structured state alongside the user message (
 ```
 
 The handler renders it as a `<user-context>` block ahead of the user message. Total serialized size caps at 10 KB. Pass a flat `{key: {object}}` structure; deeper nesting is serialized as raw JSON.
+
+If you need the context to remain available for metadata/audit purposes but do not want it injected into the model prompt, send `"suppress_user_context": true` alongside `x_context`.
 
 `x_context` is an IronClaw extension and is not part of the OpenAI Responses API spec.
 
