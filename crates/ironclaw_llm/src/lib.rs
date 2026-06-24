@@ -116,6 +116,7 @@ pub use token_refreshing::TokenRefreshingProvider;
 
 #[cfg(feature = "registry-provider-factory")]
 use std::path::Path;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
@@ -945,17 +946,231 @@ pub(crate) struct ProviderChainComponents {
     pub cheap: Option<Arc<dyn LlmProvider>>,
 }
 
+struct ModelRoutingProvider {
+    default_provider: Arc<dyn LlmProvider>,
+    config: LlmConfig,
+    session: Arc<SessionManager>,
+    providers_by_model: tokio::sync::RwLock<HashMap<String, Arc<dyn LlmProvider>>>,
+    build_lock: tokio::sync::Mutex<()>,
+}
+
+impl ModelRoutingProvider {
+    fn new(default_provider: Arc<dyn LlmProvider>, config: LlmConfig, session: Arc<SessionManager>) -> Self {
+        Self {
+            default_provider,
+            config,
+            session,
+            providers_by_model: tokio::sync::RwLock::new(HashMap::new()),
+            build_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn requires_model_bound_routing(&self, requested_model: &str) -> bool {
+        self.default_provider
+            .effective_model_name(Some(requested_model))
+            != requested_model
+    }
+
+    async fn provider_for_model(&self, requested_model: &str) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if let Some(existing) = self
+            .providers_by_model
+            .read()
+            .await
+            .get(requested_model)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let _build_guard = self.build_lock.lock().await;
+
+        if let Some(existing) = self
+            .providers_by_model
+            .read()
+            .await
+            .get(requested_model)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
+        let routed_config = with_requested_model(&self.config, requested_model)?;
+        let routed_components = build_provider_chain_components_with_options(
+            &routed_config,
+            Arc::clone(&self.session),
+            false,
+            false,
+        )
+        .await?;
+        let provider = routed_components.primary;
+
+        self.providers_by_model
+            .write()
+            .await
+            .insert(requested_model.to_string(), Arc::clone(&provider));
+
+        tracing::debug!(
+            requested_model = %requested_model,
+            backend = %self.config.backend,
+            "Model router created model-bound provider instance"
+        );
+
+        Ok(provider)
+    }
+}
+
+fn with_requested_model(config: &LlmConfig, requested_model: &str) -> Result<LlmConfig, LlmError> {
+    let mut routed = config.clone();
+    let requested_model = requested_model.to_string();
+
+    match routed.backend_kind() {
+        LlmBackendKind::NearAi => {
+            routed.nearai.model = requested_model;
+        }
+        LlmBackendKind::Bedrock => {
+            let bedrock = routed.bedrock.as_mut().ok_or_else(|| LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock backend selected but bedrock config is missing".to_string(),
+            })?;
+            bedrock.model = requested_model;
+        }
+        LlmBackendKind::GeminiOauth => {
+            let gemini = routed
+                .gemini_oauth
+                .as_mut()
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: "gemini_oauth".to_string(),
+                    reason: "Gemini OAuth backend selected but gemini_oauth config is missing"
+                        .to_string(),
+                })?;
+            gemini.model = requested_model;
+        }
+        LlmBackendKind::OpenAiCodex => {
+            let codex =
+                routed
+                    .openai_codex
+                    .as_mut()
+                    .ok_or_else(|| LlmError::RequestFailed {
+                        provider: "openai_codex".to_string(),
+                        reason: "OpenAI Codex backend selected but openai_codex config is missing"
+                            .to_string(),
+                    })?;
+            codex.model = requested_model;
+        }
+        LlmBackendKind::Registry(_) => {
+            let provider = routed
+                .provider
+                .as_mut()
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: routed.backend.clone(),
+                    reason: "Registry backend selected but registry provider config is missing"
+                        .to_string(),
+                })?;
+            provider.model = requested_model;
+        }
+    }
+
+    Ok(routed)
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ModelRoutingProvider {
+    fn model_name(&self) -> &str {
+        self.default_provider.model_name()
+    }
+
+    fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+        self.default_provider.cost_per_token()
+    }
+
+    async fn complete(&self, mut request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        if let Some(requested_model) = normalized_model_override(request.model.as_deref())
+            && self.requires_model_bound_routing(requested_model)
+        {
+            let provider = self.provider_for_model(requested_model).await?;
+            request.model = None;
+            return provider.complete(request).await;
+        }
+
+        self.default_provider.complete(request).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        mut request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        if let Some(requested_model) = normalized_model_override(request.model.as_deref())
+            && self.requires_model_bound_routing(requested_model)
+        {
+            let provider = self.provider_for_model(requested_model).await?;
+            request.model = None;
+            return provider.complete_with_tools(request).await;
+        }
+
+        self.default_provider.complete_with_tools(request).await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        let mut models = self.default_provider.list_models().await?;
+        let mut seen: HashSet<String> = models.iter().cloned().collect();
+
+        for provider in self.providers_by_model.read().await.values() {
+            let provider_models = provider.list_models().await?;
+            for model in provider_models {
+                if seen.insert(model.clone()) {
+                    models.push(model);
+                }
+            }
+        }
+
+        Ok(models)
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.default_provider.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        match normalized_model_override(requested_model) {
+            Some(model) if self.requires_model_bound_routing(model) => model.to_string(),
+            Some(model) => self.default_provider.effective_model_name(Some(model)),
+            None => self.default_provider.effective_model_name(None),
+        }
+    }
+
+    fn active_model_name(&self) -> String {
+        self.default_provider.active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.default_provider.set_model(model)?;
+        if let Ok(mut providers) = self.providers_by_model.try_write() {
+            providers.clear();
+        }
+        Ok(())
+    }
+
+    fn cache_write_multiplier(&self) -> rust_decimal::Decimal {
+        self.default_provider.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> rust_decimal::Decimal {
+        self.default_provider.cache_read_discount()
+    }
+}
+
 pub(crate) async fn build_provider_chain_components(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<ProviderChainComponents, LlmError> {
-    build_provider_chain_components_with_options(config, session, true).await
+    build_provider_chain_components_with_options(config, session, true, true).await
 }
 
 async fn build_provider_chain_components_with_options(
     config: &LlmConfig,
     session: Arc<SessionManager>,
     include_standalone_cheap: bool,
+    enable_model_routing: bool,
 ) -> Result<ProviderChainComponents, LlmError> {
     let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
         create_openai_codex_provider(config).await?
@@ -1080,6 +1295,16 @@ async fn build_provider_chain_components_with_options(
         llm
     };
 
+    let llm: Arc<dyn LlmProvider> = if enable_model_routing {
+        Arc::new(ModelRoutingProvider::new(
+            llm,
+            config.clone(),
+            Arc::clone(&session),
+        ))
+    } else {
+        llm
+    };
+
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
     let cheap_llm = if include_standalone_cheap {
         create_cheap_llm_provider(config, session)?
@@ -1102,7 +1327,8 @@ pub async fn build_static_provider_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let components = build_provider_chain_components_with_options(config, session, false).await?;
+    let components =
+        build_provider_chain_components_with_options(config, session, false, true).await?;
     let primary = components.primary;
     let recording_handle = RecordingLlm::from_env(primary.clone());
     Ok(if let Some(recorder) = recording_handle {
@@ -1362,6 +1588,47 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    #[test]
+    fn with_requested_model_updates_nearai_model() {
+        let config = test_llm_config();
+        let routed = with_requested_model(&config, "qwen3.6:27b").expect("route config");
+
+        assert_eq!(routed.nearai.model, "qwen3.6:27b");
+        assert_eq!(config.nearai.model, "test-model");
+    }
+
+    #[test]
+    fn with_requested_model_updates_registry_provider_model() {
+        let mut config = test_llm_config();
+        config.backend = "openai".to_string();
+        config.provider = Some(RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "openai",
+            None,
+            "https://api.openai.com/v1",
+            "gpt-4o-mini",
+        ));
+
+        let routed = with_requested_model(&config, "gpt-4.1").expect("route config");
+
+        assert_eq!(
+            routed
+                .provider
+                .as_ref()
+                .expect("provider should exist")
+                .model,
+            "gpt-4.1"
+        );
+        assert_eq!(
+            config
+                .provider
+                .as_ref()
+                .expect("provider should exist")
+                .model,
+            "gpt-4o-mini"
+        );
     }
 
     /// Exercise the `LlmReloadHandle::reload` path end-to-end: build an
