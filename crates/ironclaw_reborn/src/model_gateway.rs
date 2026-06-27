@@ -1207,7 +1207,8 @@ fn is_likely_capability_reference(token: &str) -> bool {
 }
 
 fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    let previous_word = content[..start]
+    let previous_content = &content[..start]; // safety: start is produced by char_indices or content.len().
+    let previous_word = previous_content
         .trim_end()
         .rsplit(|character: char| !is_capability_request_word_char(character))
         .find(|word| !word.is_empty());
