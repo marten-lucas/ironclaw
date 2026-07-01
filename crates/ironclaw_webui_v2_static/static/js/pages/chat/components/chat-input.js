@@ -239,7 +239,18 @@ export function ChatInput({
       (submittedAttachments.length > 0 ? ATTACHMENTS_ONLY_CONTENT : "");
     const submittedDraftKey = draftKey;
     const submittedScope = storageScope;
-    if (!sendContent || sendBlockedRef.current) return;
+    const domSendDisabled =
+      textareaRef.current?.dataset?.sendDisabled === "true";
+    if (
+      !sendContent ||
+      disabled ||
+      sendDisabled ||
+      isSending ||
+      domSendDisabled ||
+      sendBlockedRef.current
+    ) {
+      return;
+    }
     sendBlockedRef.current = true;
     setIsSending(true);
     textRef.current = "";
@@ -294,12 +305,13 @@ export function ChatInput({
   }, [
     text,
     attachments,
+    disabled,
+    sendDisabled,
+    isSending,
     onSend,
     draftKey,
     storageScope,
     cancelPendingDraft,
-    disabled,
-    sendDisabled,
   ]);
 
   const handleChange = React.useCallback(
@@ -331,6 +343,7 @@ export function ChatInput({
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         const domSendDisabled =
+          e.currentTarget?.dataset?.sendDisabled === "true" ||
           textareaRef.current?.dataset?.sendDisabled === "true";
         if (domSendDisabled || sendBlockedRef.current) return;
         handleSend();
