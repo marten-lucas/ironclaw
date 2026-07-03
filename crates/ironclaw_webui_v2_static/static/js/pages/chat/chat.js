@@ -53,23 +53,6 @@ function buildModelProbePayload(provider, builtinOverrides) {
     provider_id: String(provider.id || "").trim(),
     provider_type: provider.builtin ? "builtin" : "custom",
   };
-
-  React.useEffect(() => {
-    const allowedProviderIds = new Set(
-      configuredProviders
-        .map((provider) => String(provider.id || "").trim())
-        .filter(Boolean)
-    );
-    setDetectedModelsByProvider((prev) => {
-      const next = {};
-      for (const [providerId, models] of Object.entries(prev || {})) {
-        if (allowedProviderIds.has(providerId)) {
-          next[providerId] = models;
-        }
-      }
-      return next;
-    });
-  }, [configuredProviders]);
   if (model) payload.model = model;
   return payload;
 }
@@ -128,9 +111,18 @@ export function Chat({
     [llmProviders.providers, llmProviders.builtinOverrides]
   );
 
+  const modelSelectionProviders = React.useMemo(() => {
+    const activeProviderId = String(llmProviders.activeProviderId || "").trim();
+    if (!activeProviderId) return configuredProviders;
+    const activeConfigured = configuredProviders.filter(
+      (provider) => String(provider.id || "").trim() === activeProviderId
+    );
+    return activeConfigured.length > 0 ? activeConfigured : configuredProviders;
+  }, [configuredProviders, llmProviders.activeProviderId]);
+
   React.useEffect(() => {
     const allowedProviderIds = new Set(
-      configuredProviders
+      modelSelectionProviders
         .map((provider) => String(provider.id || "").trim())
         .filter(Boolean)
     );
@@ -143,11 +135,11 @@ export function Chat({
       }
       return next;
     });
-  }, [configuredProviders]);
+  }, [modelSelectionProviders]);
 
   const detectModels = React.useCallback(
     async ({ silent = false } = {}) => {
-      if (configuredProviders.length === 0) {
+      if (modelSelectionProviders.length === 0) {
         setDetectedModelsByProvider({});
         if (!silent) {
           setDetectedModelsMessage("No configured providers available for model detection.");
@@ -163,7 +155,7 @@ export function Chat({
       let modelCount = 0;
 
       await Promise.all(
-        configuredProviders.map(async (provider) => {
+        modelSelectionProviders.map(async (provider) => {
           try {
             const result = await llmProviders.listModels(
               buildModelProbePayload(provider, llmProviders.builtinOverrides)
@@ -203,7 +195,7 @@ export function Chat({
 
       setDetectingModels(false);
     },
-    [configuredProviders, llmProviders]
+    [modelSelectionProviders, llmProviders]
   );
 
   const initialModelDetectionStartedRef = React.useRef(false);
@@ -216,7 +208,7 @@ export function Chat({
 
   const newThreadModelChoices = React.useMemo(() => {
     const options = [];
-    for (const provider of configuredProviders) {
+    for (const provider of modelSelectionProviders) {
       const providerId = String(provider.id || "").trim();
       if (!providerId) continue;
       const detectedModels = detectedModelsByProvider[providerId] || [];
@@ -243,7 +235,7 @@ export function Chat({
     }
     return options;
   }, [
-    configuredProviders,
+    modelSelectionProviders,
     detectedModelsByProvider,
     llmProviders.builtinOverrides,
   ]);
@@ -395,13 +387,11 @@ export function Chat({
     if (isProcessing) {
       setThreadState(activeThreadId, THREAD_STATE.RUNNING);
       return undefined;
-                      ${newThreadModelChoices.length === 0
-                        ? html`<option value="">No detected models</option>`
-                        : newThreadModelChoices.map(
-                            (choice) => html`
-                              <option key=${choice.key} value=${choice.key}>${choice.label}</option>
-                            `
-                          )}
+    }
+    const timer = setTimeout(
+      () => clearThreadState(activeThreadId),
+      THREAD_STATE_CLEAR_GRACE_MS
+    );
     return () => clearTimeout(timer);
   }, [activeThreadId, pendingGate, isProcessing]);
 
@@ -462,11 +452,13 @@ export function Chat({
                       className="v2-select h-8 min-w-0 flex-1 rounded-[8px] px-2.5 py-0 text-xs normal-case tracking-normal"
                       disabled=${newThreadModelChoices.length === 0}
                     >
-                      ${newThreadModelChoices.map(
-                        (choice) => html`
-                          <option key=${choice.key} value=${choice.key}>${choice.label}</option>
-                        `
-                      )}
+                      ${newThreadModelChoices.length === 0
+                        ? html`<option value="">No detected models</option>`
+                        : newThreadModelChoices.map(
+                            (choice) => html`
+                              <option key=${choice.key} value=${choice.key}>${choice.label}</option>
+                            `
+                          )}
                     </select>
                     <button
                       type="button"
