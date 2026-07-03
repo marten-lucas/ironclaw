@@ -21,7 +21,11 @@ import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
 import { useLlmProviders } from "../settings/hooks/useLlmProviders.js";
-import { providerDefaultModel } from "../settings/lib/llm-providers.js";
+import {
+  isProviderConfigured,
+  providerDefaultModel,
+  providerEffectiveBaseUrl,
+} from "../settings/lib/llm-providers.js";
 import { setActiveLlm } from "../settings/lib/settings-api.js";
 import {
   getThreadModelBinding,
@@ -40,6 +44,18 @@ import {
  * is intentionally not instrumented; revisit this constant (not add
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
+
+function buildModelProbePayload(provider, builtinOverrides) {
+  const model = providerDefaultModel(provider, builtinOverrides).trim();
+  const payload = {
+    adapter: provider.adapter,
+    base_url: providerEffectiveBaseUrl(provider, builtinOverrides).trim() || provider.base_url || "",
+    provider_id: String(provider.id || "").trim(),
+    provider_type: provider.builtin ? "builtin" : "custom",
+  };
+  if (model) payload.model = model;
+  return payload;
+}
 
 export function Chat({
   threads,
@@ -83,22 +99,121 @@ export function Chat({
     gatewayStatus,
     enabled: true,
   });
+  const [detectedModelsByProvider, setDetectedModelsByProvider] = React.useState({});
+  const [detectedModelsMessage, setDetectedModelsMessage] = React.useState("");
+  const [detectingModels, setDetectingModels] = React.useState(false);
+
+  const configuredProviders = React.useMemo(
+    () =>
+      (llmProviders.providers || []).filter((provider) =>
+        isProviderConfigured(provider, llmProviders.builtinOverrides)
+      ),
+    [llmProviders.providers, llmProviders.builtinOverrides]
+  );
+
+  const detectModels = React.useCallback(
+    async ({ silent = false } = {}) => {
+      if (configuredProviders.length === 0) {
+        if (!silent) {
+          setDetectedModelsMessage("No configured providers available for model detection.");
+        }
+        return;
+      }
+
+      setDetectingModels(true);
+      if (!silent) setDetectedModelsMessage("");
+
+      const updates = {};
+      let successCount = 0;
+      let modelCount = 0;
+
+      await Promise.all(
+        configuredProviders.map(async (provider) => {
+          try {
+            const result = await llmProviders.listModels(
+              buildModelProbePayload(provider, llmProviders.builtinOverrides)
+            );
+            if (!result?.ok || !Array.isArray(result.models)) return;
+            const models = Array.from(
+              new Set(
+                result.models
+                  .map((model) => String(model || "").trim())
+                  .filter(Boolean)
+              )
+            );
+            if (models.length === 0) return;
+            updates[provider.id] = models;
+            successCount += 1;
+            modelCount += models.length;
+          } catch {
+            // Individual provider failures should not block other detections.
+          }
+        })
+      );
+
+      setDetectedModelsByProvider((prev) => ({
+        ...prev,
+        ...updates,
+      }));
+
+      if (!silent) {
+        if (successCount > 0) {
+          setDetectedModelsMessage(
+            `Detected ${modelCount} model${modelCount === 1 ? "" : "s"} from ${successCount} provider${successCount === 1 ? "" : "s"}.`
+          );
+        } else {
+          setDetectedModelsMessage("No models detected. Verify provider credentials and connectivity.");
+        }
+      }
+
+      setDetectingModels(false);
+    },
+    [configuredProviders, llmProviders]
+  );
+
+  const initialModelDetectionStartedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (initialModelDetectionStartedRef.current) return;
+    if (llmProviders.isLoading) return;
+    initialModelDetectionStartedRef.current = true;
+    detectModels({ silent: true });
+  }, [detectModels, llmProviders.isLoading]);
+
   const newThreadModelChoices = React.useMemo(() => {
     const options = [];
-    for (const provider of llmProviders.providers || []) {
-      const model = providerDefaultModel(provider, llmProviders.builtinOverrides);
-      if (!model) continue;
+    const providersSource = configuredProviders.length > 0 ? configuredProviders : llmProviders.providers || [];
+    for (const provider of providersSource) {
       const providerId = String(provider.id || "").trim();
       if (!providerId) continue;
+      const detectedModels = detectedModelsByProvider[providerId] || [];
+      if (detectedModels.length > 0) {
+        for (const model of detectedModels) {
+          options.push({
+            key: `${providerId}::${model}`,
+            label: `${providerId} / ${model}`,
+            providerId,
+            model,
+          });
+        }
+        continue;
+      }
+
+      const fallbackModel = providerDefaultModel(provider, llmProviders.builtinOverrides);
+      if (!fallbackModel) continue;
       options.push({
-        key: `${providerId}::${model}`,
-        label: `${providerId} / ${model}`,
+        key: `${providerId}::${fallbackModel}`,
+        label: `${providerId} / ${fallbackModel}`,
         providerId,
-        model,
+        model: fallbackModel,
       });
     }
     return options;
-  }, [llmProviders.providers, llmProviders.builtinOverrides]);
+  }, [
+    configuredProviders,
+    detectedModelsByProvider,
+    llmProviders.providers,
+    llmProviders.builtinOverrides,
+  ]);
   const [newThreadModelKey, setNewThreadModelKey] = React.useState("");
 
   React.useEffect(() => {
@@ -302,23 +417,38 @@ export function Chat({
             canCancel=${canCancelRun}
             onCancel=${handleCancelRun}
             preComposerContent=${html`
-              <label
-                className="mb-3 flex items-center gap-2 text-left text-xs font-medium uppercase tracking-[0.12em] text-iron-300"
-              >
-                <span>Model For New Conversation</span>
-                <select
-                  value=${newThreadModelKey}
-                  onChange=${(event) => setNewThreadModelKey(event.target.value)}
-                  className="v2-select ml-auto min-w-[260px] rounded-md border border-white/10 bg-iron-900 px-2 py-1.5 text-xs normal-case tracking-normal text-iron-100 outline-none focus:border-signal/60"
-                  disabled=${newThreadModelChoices.length === 0}
-                >
-                  ${newThreadModelChoices.map(
-                    (choice) => html`
-                      <option key=${choice.key} value=${choice.key}>${choice.label}</option>
+              <div className="mb-3 space-y-2">
+                <div className="flex flex-wrap items-center gap-2 text-left text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+                  <span>Model For New Conversation</span>
+                  <div className="ml-auto flex min-w-[260px] items-center gap-2">
+                    <select
+                      value=${newThreadModelKey}
+                      onChange=${(event) => setNewThreadModelKey(event.target.value)}
+                      className="v2-select h-8 min-w-0 flex-1 rounded-[8px] px-2.5 py-0 text-xs normal-case tracking-normal"
+                      disabled=${newThreadModelChoices.length === 0}
+                    >
+                      ${newThreadModelChoices.map(
+                        (choice) => html`
+                          <option key=${choice.key} value=${choice.key}>${choice.label}</option>
+                        `
+                      )}
+                    </select>
+                    <button
+                      type="button"
+                      className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs normal-case tracking-normal text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+                      onClick=${() => detectModels({ silent: false })}
+                      disabled=${detectingModels}
+                    >
+                      ${detectingModels ? "Detecting..." : "Detect Models"}
+                    </button>
+                  </div>
+                </div>
+                ${detectedModelsMessage
+                  ? html`
+                      <p className="text-[11px] text-[var(--v2-text-muted)]">${detectedModelsMessage}</p>
                     `
-                  )}
-                </select>
-              </label>
+                  : null}
+              </div>
             `}
           />
         `}
