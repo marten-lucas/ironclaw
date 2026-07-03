@@ -14,6 +14,7 @@ export function EmptyState({
   statusText,
   canCancel,
   onCancel,
+  preComposerContent,
 }) {
   const t = useT();
   const suggestions = [
@@ -52,6 +53,7 @@ export function EmptyState({
       </div>
 
       <div className="mt-9 w-full max-w-5xl">
+        ${preComposerContent || null}
         <${ChatInput}
           onSend=${onSend}
           disabled=${disabled}

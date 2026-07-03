@@ -6,6 +6,7 @@ import {
   listThreads,
 } from "../../../lib/api.js";
 import { queryClient } from "../../../lib/query-client.js";
+import { clearThreadModelBinding } from "../lib/thread-model-bindings.js";
 
 export function useThreads() {
   // No polling: the sidebar refreshes via `queryClient.invalidateQueries`
@@ -54,6 +55,7 @@ export function useThreads() {
   const handleDeleteThread = React.useCallback(
     async (threadId) => {
       await deleteThreadRequest({ threadId });
+      clearThreadModelBinding(threadId);
       if (activeThreadId === threadId) {
         setActiveThreadId(null);
       }

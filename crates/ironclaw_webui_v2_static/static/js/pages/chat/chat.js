@@ -20,6 +20,13 @@ import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
+import { useLlmProviders } from "../settings/hooks/useLlmProviders.js";
+import { providerDefaultModel } from "../settings/lib/llm-providers.js";
+import { setActiveLlm } from "../settings/lib/settings-api.js";
+import {
+  getThreadModelBinding,
+  setThreadModelBinding,
+} from "./lib/thread-model-bindings.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -71,6 +78,75 @@ export function Chat({
     () => threads.find((thread) => thread.id === activeThreadId) || null,
     [threads, activeThreadId]
   );
+  const llmProviders = useLlmProviders({
+    settings: {},
+    gatewayStatus,
+    enabled: true,
+  });
+  const newThreadModelChoices = React.useMemo(() => {
+    const options = [];
+    for (const provider of llmProviders.providers || []) {
+      const model = providerDefaultModel(provider, llmProviders.builtinOverrides);
+      if (!model) continue;
+      const providerId = String(provider.id || "").trim();
+      if (!providerId) continue;
+      options.push({
+        key: `${providerId}::${model}`,
+        label: `${providerId} / ${model}`,
+        providerId,
+        model,
+      });
+    }
+    return options;
+  }, [llmProviders.providers, llmProviders.builtinOverrides]);
+  const [newThreadModelKey, setNewThreadModelKey] = React.useState("");
+
+  React.useEffect(() => {
+    if (newThreadModelChoices.length === 0) {
+      setNewThreadModelKey("");
+      return;
+    }
+    if (newThreadModelChoices.some((choice) => choice.key === newThreadModelKey)) {
+      return;
+    }
+    const activeKey = `${llmProviders.activeProviderId || ""}::${llmProviders.selectedModel || ""}`;
+    const preferred =
+      newThreadModelChoices.find((choice) => choice.key === activeKey) ||
+      newThreadModelChoices[0];
+    setNewThreadModelKey(preferred.key);
+  }, [
+    newThreadModelChoices,
+    newThreadModelKey,
+    llmProviders.activeProviderId,
+    llmProviders.selectedModel,
+  ]);
+
+  const selectedNewThreadModel = React.useMemo(
+    () => newThreadModelChoices.find((choice) => choice.key === newThreadModelKey) || null,
+    [newThreadModelChoices, newThreadModelKey]
+  );
+
+  React.useEffect(() => {
+    if (!activeThreadId) return;
+    const binding = getThreadModelBinding(activeThreadId);
+    if (!binding) return;
+    if (
+      binding.providerId === llmProviders.activeProviderId &&
+      binding.model === llmProviders.selectedModel
+    ) {
+      return;
+    }
+    setActiveLlm({
+      provider_id: binding.providerId,
+      model: binding.model,
+    }).catch((error) => {
+      console.error("Failed to activate thread model binding:", error);
+    });
+  }, [
+    activeThreadId,
+    llmProviders.activeProviderId,
+    llmProviders.selectedModel,
+  ]);
   const runtimeContext = React.useMemo(
     () => buildRuntimeContext({ gatewayStatus, activeThread }),
     [gatewayStatus, activeThread]
@@ -96,18 +172,27 @@ export function Chat({
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
+      if (!activeThreadId && selectedNewThreadModel) {
+        await setActiveLlm({
+          provider_id: selectedNewThreadModel.providerId,
+          model: selectedNewThreadModel.model,
+        });
+      }
       const response = await send(content, {
         images,
         attachments,
         threadId: activeThreadId,
       });
       const responseThreadId = response?.thread_id || activeThreadId;
+      if (!activeThreadId && responseThreadId && selectedNewThreadModel) {
+        setThreadModelBinding(responseThreadId, selectedNewThreadModel);
+      }
       if (!activeThreadId && responseThreadId && onSelectThread) {
         onSelectThread(responseThreadId, { replace: true });
       }
       return response;
     },
-    [activeThreadId, onSelectThread, send]
+    [activeThreadId, onSelectThread, selectedNewThreadModel, send]
   );
 
   const handleSuggestion = React.useCallback(
@@ -216,6 +301,25 @@ export function Chat({
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
             onCancel=${handleCancelRun}
+            preComposerContent=${html`
+              <label
+                className="mb-3 flex items-center gap-2 text-left text-xs font-medium uppercase tracking-[0.12em] text-iron-300"
+              >
+                <span>Model For New Conversation</span>
+                <select
+                  value=${newThreadModelKey}
+                  onChange=${(event) => setNewThreadModelKey(event.target.value)}
+                  className="v2-select ml-auto min-w-[260px] rounded-md border border-white/10 bg-iron-900 px-2 py-1.5 text-xs normal-case tracking-normal text-iron-100 outline-none focus:border-signal/60"
+                  disabled=${newThreadModelChoices.length === 0}
+                >
+                  ${newThreadModelChoices.map(
+                    (choice) => html`
+                      <option key=${choice.key} value=${choice.key}>${choice.label}</option>
+                    `
+                  )}
+                </select>
+              </label>
+            `}
           />
         `}
         ${!showLanding &&
