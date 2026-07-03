@@ -112,12 +112,16 @@ export function Chat({
   );
 
   const modelSelectionProviders = React.useMemo(() => {
+    const ollamaConfigured = configuredProviders.filter(
+      (provider) => String(provider.adapter || "").trim().toLowerCase() === "ollama"
+    );
+    if (ollamaConfigured.length > 0) return ollamaConfigured;
+
     const activeProviderId = String(llmProviders.activeProviderId || "").trim();
-    if (!activeProviderId) return configuredProviders;
-    const activeConfigured = configuredProviders.filter(
+    if (!activeProviderId) return [];
+    return configuredProviders.filter(
       (provider) => String(provider.id || "").trim() === activeProviderId
     );
-    return activeConfigured.length > 0 ? activeConfigured : configuredProviders;
   }, [configuredProviders, llmProviders.activeProviderId]);
 
   React.useEffect(() => {
@@ -265,6 +269,43 @@ export function Chat({
     () => newThreadModelChoices.find((choice) => choice.key === newThreadModelKey) || null,
     [newThreadModelChoices, newThreadModelKey]
   );
+
+  const newThreadModelControls = html`
+    <div className="mb-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-left text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+        <span>Model For New Conversation</span>
+        <div className="ml-auto flex min-w-[260px] items-center gap-2">
+          <select
+            value=${newThreadModelKey}
+            onChange=${(event) => setNewThreadModelKey(event.target.value)}
+            className="v2-select h-8 min-w-0 flex-1 rounded-[8px] px-2.5 py-0 text-xs normal-case tracking-normal"
+            disabled=${newThreadModelChoices.length === 0}
+          >
+            ${newThreadModelChoices.length === 0
+              ? html`<option value="">No detected models</option>`
+              : newThreadModelChoices.map(
+                  (choice) => html`
+                    <option key=${choice.key} value=${choice.key}>${choice.label}</option>
+                  `
+                )}
+          </select>
+          <button
+            type="button"
+            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs normal-case tracking-normal text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+            onClick=${() => detectModels({ silent: false })}
+            disabled=${detectingModels}
+          >
+            ${detectingModels ? "Detecting..." : "Detect Models"}
+          </button>
+        </div>
+      </div>
+      ${detectedModelsMessage
+        ? html`
+            <p className="text-[11px] text-[var(--v2-text-muted)]">${detectedModelsMessage}</p>
+          `
+        : null}
+    </div>
+  `;
 
   React.useEffect(() => {
     if (!activeThreadId) return;
@@ -441,42 +482,7 @@ export function Chat({
             statusText=${composerStatusText}
             canCancel=${canCancelRun}
             onCancel=${handleCancelRun}
-            preComposerContent=${html`
-              <div className="mb-3 space-y-2">
-                <div className="flex flex-wrap items-center gap-2 text-left text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
-                  <span>Model For New Conversation</span>
-                  <div className="ml-auto flex min-w-[260px] items-center gap-2">
-                    <select
-                      value=${newThreadModelKey}
-                      onChange=${(event) => setNewThreadModelKey(event.target.value)}
-                      className="v2-select h-8 min-w-0 flex-1 rounded-[8px] px-2.5 py-0 text-xs normal-case tracking-normal"
-                      disabled=${newThreadModelChoices.length === 0}
-                    >
-                      ${newThreadModelChoices.length === 0
-                        ? html`<option value="">No detected models</option>`
-                        : newThreadModelChoices.map(
-                            (choice) => html`
-                              <option key=${choice.key} value=${choice.key}>${choice.label}</option>
-                            `
-                          )}
-                    </select>
-                    <button
-                      type="button"
-                      className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs normal-case tracking-normal text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
-                      onClick=${() => detectModels({ silent: false })}
-                      disabled=${detectingModels}
-                    >
-                      ${detectingModels ? "Detecting..." : "Detect Models"}
-                    </button>
-                  </div>
-                </div>
-                ${detectedModelsMessage
-                  ? html`
-                      <p className="text-[11px] text-[var(--v2-text-muted)]">${detectedModelsMessage}</p>
-                    `
-                  : null}
-              </div>
-            `}
+            preComposerContent=${newThreadModelControls}
           />
         `}
         ${!showLanding &&
@@ -548,6 +554,8 @@ export function Chat({
             suggestions=${suggestions}
             onSelect=${handleSuggestion}
           />
+
+          <div className="px-4 pb-1 pt-2 sm:px-5 lg:px-8">${newThreadModelControls}</div>
 
           <${ChatInput}
             onSend=${handleSend}
