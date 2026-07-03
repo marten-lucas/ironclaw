@@ -53,6 +53,23 @@ function buildModelProbePayload(provider, builtinOverrides) {
     provider_id: String(provider.id || "").trim(),
     provider_type: provider.builtin ? "builtin" : "custom",
   };
+
+  React.useEffect(() => {
+    const allowedProviderIds = new Set(
+      configuredProviders
+        .map((provider) => String(provider.id || "").trim())
+        .filter(Boolean)
+    );
+    setDetectedModelsByProvider((prev) => {
+      const next = {};
+      for (const [providerId, models] of Object.entries(prev || {})) {
+        if (allowedProviderIds.has(providerId)) {
+          next[providerId] = models;
+        }
+      }
+      return next;
+    });
+  }, [configuredProviders]);
   if (model) payload.model = model;
   return payload;
 }
@@ -111,9 +128,27 @@ export function Chat({
     [llmProviders.providers, llmProviders.builtinOverrides]
   );
 
+  React.useEffect(() => {
+    const allowedProviderIds = new Set(
+      configuredProviders
+        .map((provider) => String(provider.id || "").trim())
+        .filter(Boolean)
+    );
+    setDetectedModelsByProvider((prev) => {
+      const next = {};
+      for (const [providerId, models] of Object.entries(prev || {})) {
+        if (allowedProviderIds.has(providerId)) {
+          next[providerId] = models;
+        }
+      }
+      return next;
+    });
+  }, [configuredProviders]);
+
   const detectModels = React.useCallback(
     async ({ silent = false } = {}) => {
       if (configuredProviders.length === 0) {
+        setDetectedModelsByProvider({});
         if (!silent) {
           setDetectedModelsMessage("No configured providers available for model detection.");
         }
@@ -181,8 +216,7 @@ export function Chat({
 
   const newThreadModelChoices = React.useMemo(() => {
     const options = [];
-    const providersSource = configuredProviders.length > 0 ? configuredProviders : llmProviders.providers || [];
-    for (const provider of providersSource) {
+    for (const provider of configuredProviders) {
       const providerId = String(provider.id || "").trim();
       if (!providerId) continue;
       const detectedModels = detectedModelsByProvider[providerId] || [];
@@ -211,7 +245,6 @@ export function Chat({
   }, [
     configuredProviders,
     detectedModelsByProvider,
-    llmProviders.providers,
     llmProviders.builtinOverrides,
   ]);
   const [newThreadModelKey, setNewThreadModelKey] = React.useState("");
@@ -362,11 +395,13 @@ export function Chat({
     if (isProcessing) {
       setThreadState(activeThreadId, THREAD_STATE.RUNNING);
       return undefined;
-    }
-    const timer = setTimeout(
-      () => clearThreadState(activeThreadId),
-      THREAD_STATE_CLEAR_GRACE_MS
-    );
+                      ${newThreadModelChoices.length === 0
+                        ? html`<option value="">No detected models</option>`
+                        : newThreadModelChoices.map(
+                            (choice) => html`
+                              <option key=${choice.key} value=${choice.key}>${choice.label}</option>
+                            `
+                          )}
     return () => clearTimeout(timer);
   }, [activeThreadId, pendingGate, isProcessing]);
 
