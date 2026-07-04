@@ -31,17 +31,32 @@
       }
     ],
     "secret_config_mappings": [
-      { "config_key": "base_url", "secret_name": "nextcloud_talk_base_url" },
-      { "config_key": "bot_secret", "secret_name": "nextcloud_talk_bot_secret" },
-      { "config_key": "backend_allowlist_raw", "secret_name": "nextcloud_talk_backend_allowlist" }
+      {
+        "config_key": "base_url",
+        "secret_name": "nextcloud_talk_base_url"
+      },
+      {
+        "config_key": "bot_secret",
+        "secret_name": "nextcloud_talk_bot_secret"
+      },
+      {
+        "config_key": "backend_allowlist_raw",
+        "secret_name": "nextcloud_talk_backend_allowlist"
+      }
     ],
     "setup_url": "https://nextcloud.com/talk/"
   },
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "cloud.kiga-gramschatz.de", "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/" },
-        { "host": "10.12.12.101", "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/" }
+        {
+          "host": "cloud.kiga-gramschatz.de",
+          "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/"
+        },
+        {
+          "host": "10.12.12.101",
+          "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/"
+        }
       ],
       "rate_limit": {
         "requests_per_minute": 60,
@@ -49,10 +64,14 @@
       }
     },
     "secrets": {
-      "allowed_names": ["nextcloud_talk_*"]
+      "allowed_names": [
+        "nextcloud_talk_*"
+      ]
     },
     "channel": {
-      "allowed_paths": ["/webhook/nextcloud-talk"],
+      "allowed_paths": [
+        "/webhook/nextcloud-talk"
+      ],
       "allow_polling": false,
       "workspace_prefix": "channels/nextcloud-talk/",
       "emit_rate_limit": {
