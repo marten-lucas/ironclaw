@@ -1,0 +1,76 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "type": "channel",
+  "name": "nextcloud-talk",
+  "description": "Nextcloud Talk bot webhook channel for receiving mentions and sending responses",
+  "auth": {
+    "secret_name": "nextcloud_talk_base_url",
+    "display_name": "Nextcloud Talk",
+    "instructions": "Create a Talk bot in Nextcloud with webhook + response feature. Use your Nextcloud base URL and the bot secret from OCC.",
+    "setup_url": "https://nextcloud.com/talk/",
+    "token_hint": "https://cloud.example.tld and a long bot secret",
+    "env_var": "NEXTCLOUD_TALK_BASE_URL"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "nextcloud_talk_base_url",
+        "prompt": "Nextcloud base URL (example: https://cloud.example.tld)",
+        "optional": false
+      },
+      {
+        "name": "nextcloud_talk_bot_secret",
+        "prompt": "Nextcloud Talk bot secret from 'occ talk:bot:install'",
+        "optional": false
+      },
+      {
+        "name": "nextcloud_talk_backend_allowlist",
+        "prompt": "Optional comma-separated backend hosts allowed in X-Nextcloud-Talk-Backend",
+        "optional": true
+      }
+    ],
+    "secret_config_mappings": [
+      { "config_key": "base_url", "secret_name": "nextcloud_talk_base_url" },
+      { "config_key": "bot_secret", "secret_name": "nextcloud_talk_bot_secret" },
+      { "config_key": "backend_allowlist_raw", "secret_name": "nextcloud_talk_backend_allowlist" }
+    ],
+    "setup_url": "https://nextcloud.com/talk/"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "cloud.kiga-gramschatz.de", "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/" },
+        { "host": "10.12.12.101", "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/" }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["nextcloud_talk_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/nextcloud-talk"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/nextcloud-talk/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Nextcloud-Talk-Signature",
+        "secret_name": "nextcloud_talk_bot_secret",
+        "managed_by_host": false
+      }
+    }
+  },
+  "config": {
+    "base_url": null,
+    "bot_secret": null,
+    "backend_allowlist_raw": null,
+    "bot_display_name": "ironclaw",
+    "require_mention": true
+  }
+}
