@@ -78,7 +78,9 @@ function getTeeEndpoint(location) {
   if (parts.length < 2) return null;
 
   return {
-    base: `${location.protocol}//api.${parts.slice(1).join(".")}`,
+    // Same-origin by default: reverse proxy should expose attestation routes
+    // on the same host as WebUI to avoid cross-origin CORS failures.
+    base: location.origin,
     instance: parts[0],
   };
 }
