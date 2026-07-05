@@ -72,6 +72,7 @@ pub(crate) struct AvailableExtensionAsset {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AvailableExtensionAssetContent {
     Bytes(Vec<u8>),
+    #[allow(dead_code)]
     Filesystem(VirtualPath),
 }
 
@@ -1508,9 +1509,17 @@ where
             let module_path = module
                 .resolve_under(&package.root)
                 .map_err(map_binding_error)?;
+            let module_bytes = fs.read_file(&module_path).await.map_err(|error| {
+                ProductWorkflowError::Transient {
+                    reason: format!(
+                        "failed to read available extension module {}: {error}",
+                        module.as_str()
+                    ),
+                }
+            })?;
             assets.push(AvailableExtensionAsset {
                 path: module.as_str().to_string(),
-                content: AvailableExtensionAssetContent::Filesystem(module_path),
+                content: AvailableExtensionAssetContent::Bytes(module_bytes),
             });
         }
         packages.push(AvailableExtensionPackage {

@@ -91,7 +91,7 @@ async fn setup_extension_response(
         .package_ref
         .clone()
         .ok_or_else(RebornServicesError::internal_invariant)?;
-    let secrets = extension_setup_credentials::project(
+    let setup_projection = extension_setup_credentials::project(
         extension_credentials,
         scope,
         extension_id,
@@ -105,8 +105,8 @@ async fn setup_extension_response(
         blockers: lifecycle.blockers,
         onboarding,
         payload: lifecycle.payload,
-        secrets,
-        fields: Vec::new(),
+        secrets: setup_projection.secrets,
+        fields: setup_projection.fields,
     })
 }
 

@@ -9,7 +9,8 @@ use url::Url;
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleProductPayload, LifecycleProductResponse, RebornExtensionCredentialSetup,
-    RebornExtensionSetupSecret, RebornServicesError, WebUiInboundValidationCode,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornServicesError,
+    WebUiInboundValidationCode,
     WebUiSetupExtensionRequest,
 };
 
@@ -40,8 +41,9 @@ pub(super) async fn project(
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     requirements: &[LifecycleExtensionCredentialRequirement],
-) -> Result<Vec<RebornExtensionSetupSecret>, RebornServicesError> {
+) -> Result<ProjectedExtensionSetup, RebornServicesError> {
     let mut secrets = Vec::with_capacity(requirements.len());
+    let mut fields = Vec::new();
     for requirement in requirements {
         let account = match extension_credentials {
             Some(service) => {
@@ -50,6 +52,15 @@ pub(super) async fn project(
             }
             None => None,
         };
+        if is_open_setup_field(requirement) {
+            fields.push(RebornExtensionSetupField {
+                name: requirement.name.clone(),
+                prompt: field_prompt(requirement),
+                optional: !requirement.required,
+                placeholder: field_placeholder(requirement),
+            });
+            continue;
+        }
         secrets.push(RebornExtensionSetupSecret {
             name: requirement.name.clone(),
             provider: requirement.provider.clone(),
@@ -61,7 +72,13 @@ pub(super) async fn project(
         });
     }
     secrets.sort_by_key(|secret| !secret.provided);
-    Ok(secrets)
+    Ok(ProjectedExtensionSetup { secrets, fields })
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ProjectedExtensionSetup {
+    pub(super) secrets: Vec<RebornExtensionSetupSecret>,
+    pub(super) fields: Vec<RebornExtensionSetupField>,
 }
 
 pub(super) async fn submit_manual_tokens(
@@ -90,6 +107,12 @@ pub(super) async fn submit_manual_tokens(
                 WebUiInboundValidationCode::InvalidValue,
             ));
         };
+        if is_open_setup_field(requirement) {
+            return Err(validation_error(
+                "secrets",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
         if !matches!(
             requirement.setup,
             LifecycleExtensionCredentialSetup::ManualToken
@@ -101,19 +124,38 @@ pub(super) async fn submit_manual_tokens(
         }
     }
 
+    for submitted_name in submit.fields.keys() {
+        let Some(requirement) = by_name.get(submitted_name.as_str()) else {
+            return Err(validation_error(
+                "fields",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        };
+        if !is_open_setup_field(requirement)
+            || !matches!(
+                requirement.setup,
+                LifecycleExtensionCredentialSetup::ManualToken
+            )
+        {
+            return Err(validation_error(
+                "fields",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
+    }
+
     for requirement in requirements.iter().filter(|requirement| {
         matches!(
             requirement.setup,
             LifecycleExtensionCredentialSetup::ManualToken
         )
     }) {
-        submit_manual_token_requirement(
-            service,
-            scope.clone(),
-            extension_id,
-            requirement,
-            submit.secrets.get(&requirement.name),
-        )
+        let raw_value = if is_open_setup_field(requirement) {
+            submit.fields.get(&requirement.name)
+        } else {
+            submit.secrets.get(&requirement.name)
+        };
+        submit_manual_token_requirement(service, scope.clone(), extension_id, requirement, raw_value)
         .await?;
     }
     Ok(())
@@ -169,9 +211,15 @@ fn normalize_manual_secret_for_requirement(
     requirement: &LifecycleExtensionCredentialRequirement,
     raw_secret: &str,
 ) -> Result<String, RebornServicesError> {
+    let validation_field = if is_open_setup_field(requirement) {
+        "fields"
+    } else {
+        "secrets"
+    };
     if requirement.provider == "nextcloud_talk_base_url" {
-        let parsed = Url::parse(raw_secret)
-            .map_err(|_| validation_error("secrets", WebUiInboundValidationCode::InvalidValue))?;
+        let parsed = Url::parse(raw_secret).map_err(|_| {
+            validation_error(validation_field, WebUiInboundValidationCode::InvalidValue)
+        })?;
         if parsed.scheme() != "https"
             || parsed.host_str().is_none()
             || !parsed.username().is_empty()
@@ -180,7 +228,7 @@ fn normalize_manual_secret_for_requirement(
             || parsed.fragment().is_some()
         {
             return Err(validation_error(
-                "secrets",
+                validation_field,
                 WebUiInboundValidationCode::InvalidValue,
             ));
         }
@@ -213,13 +261,28 @@ fn setup_projection(
 }
 
 fn credential_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String {
-    if requirement.provider == "nextcloud_talk_base_url" {
-        return "Nextcloud base URL (example: https://cloud.example.tld)".to_string();
-    }
     if requirement.provider == "nextcloud_talk_bot_secret" {
         return "Nextcloud Talk bot secret from occ talk:bot:install".to_string();
     }
     format!("{} credential", requirement.provider)
+}
+
+fn is_open_setup_field(requirement: &LifecycleExtensionCredentialRequirement) -> bool {
+    requirement.provider == "nextcloud_talk_base_url"
+}
+
+fn field_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String {
+    if requirement.provider == "nextcloud_talk_base_url" {
+        return "Nextcloud base URL (example: https://cloud.example.tld)".to_string();
+    }
+    requirement.name.clone()
+}
+
+fn field_placeholder(requirement: &LifecycleExtensionCredentialRequirement) -> Option<String> {
+    if requirement.provider == "nextcloud_talk_base_url" {
+        return Some("https://cloud.example.tld".to_string());
+    }
+    None
 }
 
 fn credential_label(
@@ -238,6 +301,8 @@ fn credential_label(
 struct SetupSubmitPayload {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    fields: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
