@@ -45,9 +45,10 @@ if [ -f "$WASM_PATH" ]; then
 
     echo "Built: nextcloud-talk.wasm ($(du -h nextcloud-talk.wasm | cut -f1))"
     echo ""
-    echo "To install:"
-    echo "  mkdir -p ~/.ironclaw/channels"
-    echo "  cp nextcloud-talk.wasm nextcloud-talk.capabilities.json ~/.ironclaw/channels/"
+    echo "To install as Reborn v2 extension package:"
+    echo "  mkdir -p ~/.ironclaw-reborn/local-dev/system/extensions/nextcloud-talk/wasm"
+    echo "  cp nextcloud-talk.wasm ~/.ironclaw-reborn/local-dev/system/extensions/nextcloud-talk/wasm/nextcloud-talk.wasm"
+    echo "  cp nextcloud-talk.manifest.toml ~/.ironclaw-reborn/local-dev/system/extensions/nextcloud-talk/manifest.toml"
 else
     echo "Error: WASM output not found at $WASM_PATH"
     exit 1

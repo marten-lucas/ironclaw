@@ -1,0 +1,32 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "nextcloud-talk"
+name = "Nextcloud Talk"
+version = "0.1.0"
+description = "Nextcloud Talk ProductAdapter for IronClaw Reborn"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/nextcloud-talk.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Nextcloud-Talk-Signature"
+timestamp_header_name = "X-Nextcloud-Talk-Random"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages", "external_final_reply_push", "delivery_status_reporting"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "nextcloud_talk_bot_secret"
+
+[[product_adapter.inbound.egress]]
+host = "nextcloud.local"
+credential_handle = "nextcloud_talk_bot_secret"

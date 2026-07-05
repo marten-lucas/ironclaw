@@ -1,35 +1,22 @@
 #![allow(dead_code)]
 
 wit_bindgen::generate!({
-    world: "sandboxed-channel",
-    path: "../../wit/channel.wit",
+    world: "product-adapter-component",
+    path: "../../crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit",
 });
 
 use std::collections::HashMap;
 
-use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
-use exports::near::agent::channel::{
-    AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, StatusUpdate,
+use exports::near::product_adapter::product_adapter::{
+    AdapterManifest, AuthEvidence, AuthRequirement, AuthRequirementKind, DeclaredEgressTarget,
+    Guest, OutboundEnvelope, OutboundRender, ParsedInbound,
 };
-use near::agent::channel_host::{self, EmittedMessage};
 
-type HmacSha256 = Hmac<Sha256>;
-
-const CONFIG_PATH: &str = "state/config.json";
-
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-struct NextcloudConfig {
-    base_url: Option<String>,
-    bot_secret: Option<String>,
-    backend_allowlist_raw: Option<String>,
-    bot_display_name: Option<String>,
-    require_mention: Option<bool>,
-}
+const ADAPTER_ID: &str = "nextcloud_talk";
+const INSTALLATION_ID: &str = "nextcloud_talk_default";
+const DEFAULT_BOT_NAME: &str = "ironclaw";
 
 #[derive(Debug, Deserialize)]
 struct TalkEvent {
@@ -84,319 +71,260 @@ struct TalkParameter {
     name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct NextcloudMetadata {
-    room_token: String,
-    #[serde(default)]
-    message_id: Option<u64>,
-    #[serde(default)]
-    actor_id: Option<String>,
-}
+struct NextcloudTalkAdapter;
 
-struct NextcloudTalkChannel;
+impl Guest for NextcloudTalkAdapter {
+    fn manifest() -> AdapterManifest {
+        let capabilities_json = serde_json::json!({
+            "flags": [
+                "inbound_messages",
+                "external_final_reply_push",
+                "delivery_status_reporting"
+            ]
+        })
+        .to_string();
 
-impl Guest for NextcloudTalkChannel {
-    fn on_start(config_json: String) -> Result<ChannelConfig, String> {
-        let config: NextcloudConfig = serde_json::from_str(&config_json).unwrap_or_default();
-
-        if config
-            .base_url
-            .as_ref()
-            .is_none_or(|v| v.trim().is_empty())
-        {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                "nextcloud-talk: base_url not configured; on_respond will fail",
-            );
-        }
-        if config
-            .bot_secret
-            .as_ref()
-            .is_none_or(|v| v.trim().is_empty())
-        {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                "nextcloud-talk: bot_secret not configured; webhook auth and replies will fail",
-            );
-        }
-
-        let to_store = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
-        let _ = channel_host::workspace_write(CONFIG_PATH, &to_store);
-
-        Ok(ChannelConfig {
-            display_name: "Nextcloud Talk".to_string(),
-            http_endpoints: vec![HttpEndpointConfig {
-                path: "/webhook/nextcloud-talk".to_string(),
-                methods: vec!["POST".to_string()],
-                require_secret: false,
+        AdapterManifest {
+            adapter_id: ADAPTER_ID.to_string(),
+            installation_id: INSTALLATION_ID.to_string(),
+            capabilities_json,
+            declared_egress_targets: vec![DeclaredEgressTarget {
+                host: "nextcloud.local".to_string(),
+                credential_handle: Some("nextcloud_talk_bot_secret".to_string()),
             }],
-            poll: None,
+            declared_auth_requirements: vec![AuthRequirement {
+                kind: AuthRequirementKind::RequestSignature,
+                header_name: Some("X-Nextcloud-Talk-Signature".to_string()),
+                timestamp_header_name: Some("X-Nextcloud-Talk-Random".to_string()),
+                cookie_name: None,
+            }],
+        }
+    }
+
+    fn parse_inbound(raw_payload: Vec<u8>, _evidence: AuthEvidence) -> Result<ParsedInbound, String> {
+        let body_text = std::str::from_utf8(&raw_payload)
+            .map_err(|_| "nextcloud-talk: inbound payload is not valid UTF-8".to_string())?;
+
+        let event: TalkEvent = serde_json::from_str(body_text)
+            .map_err(|err| format!("nextcloud-talk: failed to parse event payload: {err}"))?;
+
+        let parsed = if event.event_type != "Create" || is_bot_authored(&event) {
+            build_noop_inbound(&event)?
+        } else {
+            let room_token = match extract_room_token(&event) {
+                Some(v) => v,
+                None => return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? }),
+            };
+
+            let raw_content = event
+                .object
+                .as_ref()
+                .and_then(|obj| obj.content.clone())
+                .unwrap_or_default();
+
+            let rendered = parse_message_content(&raw_content).trim().to_string();
+            if rendered.is_empty() {
+                return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
+            }
+
+            if !is_mention_for_bot(&rendered, DEFAULT_BOT_NAME) {
+                return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
+            }
+
+            let prompt = strip_mention(&rendered, DEFAULT_BOT_NAME);
+            let text = if prompt.is_empty() { rendered } else { prompt };
+            build_user_message_inbound(&event, room_token, text)?
+        };
+
+        Ok(ParsedInbound {
+            parsed_json: parsed,
         })
     }
 
-    fn on_http_request(req: IncomingHttpRequest) -> OutgoingHttpResponse {
-        if req.method != "POST" {
-            return json_response(405, serde_json::json!({"error": "Method not allowed"}));
+    fn render_outbound(envelope: OutboundEnvelope) -> Result<OutboundRender, String> {
+        let parsed: serde_json::Value = serde_json::from_str(&envelope.outbound_json)
+            .map_err(|err| format!("nextcloud-talk: outbound envelope JSON is invalid: {err}"))?;
+
+        let payload = parsed
+            .get("payload")
+            .ok_or_else(|| "nextcloud-talk: outbound envelope missing payload".to_string())?;
+
+        if payload == "keep_alive" {
+            return Ok(OutboundRender {
+                egress_request_json: serde_json::json!({
+                    "egress_target_index": 0,
+                    "method": "POST",
+                    "path": "/ocs/v2.php/apps/spreed/api/v1/bot/noop/message",
+                    "headers": [],
+                    "body": []
+                })
+                .to_string(),
+            });
         }
 
-        let config = load_config();
-        let bot_secret = match config.bot_secret.as_ref().map(|s| s.trim()) {
-            Some(v) if !v.is_empty() => v,
-            _ => {
-                return json_response(
-                    500,
-                    serde_json::json!({"error": "Missing bot_secret in channel config"}),
-                );
-            }
-        };
+        let final_reply = payload
+            .get("final_reply")
+            .ok_or_else(|| "nextcloud-talk: payload is not final_reply".to_string())?;
+        let text = final_reply
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "nextcloud-talk: final_reply payload missing text".to_string())?;
 
-        let headers = parse_headers(&req.headers_json);
-        if !backend_allowed(&headers, &config) {
-            return json_response(401, serde_json::json!({"error": "Backend origin not allowed"}));
-        }
+        let target = parsed
+            .get("target")
+            .ok_or_else(|| "nextcloud-talk: outbound envelope missing target".to_string())?;
+        let conversation = target
+            .get("external_conversation_ref")
+            .ok_or_else(|| "nextcloud-talk: target missing external_conversation_ref".to_string())?;
+        let room_token = conversation
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "nextcloud-talk: missing room token in conversation_id".to_string())?;
 
-        if !verify_nextcloud_signature(&headers, &req.body, bot_secret) {
-            return json_response(401, serde_json::json!({"error": "Invalid Nextcloud signature"}));
-        }
+        let reply_to = conversation
+            .get("reply_target_message_id")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse::<u64>().ok());
 
-        let body_text = match std::str::from_utf8(&req.body) {
-            Ok(v) => v,
-            Err(_) => {
-                return json_response(400, serde_json::json!({"error": "Invalid UTF-8 body"}));
-            }
-        };
-
-        let event: TalkEvent = match serde_json::from_str(body_text) {
-            Ok(v) => v,
-            Err(err) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("nextcloud-talk: failed to parse event: {}", err),
-                );
-                return json_response(400, serde_json::json!({"error": "Invalid event payload"}));
-            }
-        };
-
-        if event.event_type != "Create" {
-            return json_response(200, serde_json::json!({"ok": true, "ignored": event.event_type}));
-        }
-
-        if is_bot_authored(&event) {
-            return json_response(200, serde_json::json!({"ok": true, "ignored": "bot-authored"}));
-        }
-
-        let room_token = match extract_room_token(&event) {
-            Some(v) => v,
-            None => {
-                return json_response(200, serde_json::json!({"ok": true, "ignored": "missing-room-token"}));
-            }
-        };
-
-        let raw_content = event
-            .object
-            .as_ref()
-            .and_then(|obj| obj.content.clone())
-            .unwrap_or_default();
-
-        let rendered = parse_message_content(&raw_content).trim().to_string();
-        if rendered.is_empty() {
-            return json_response(200, serde_json::json!({"ok": true, "ignored": "empty-message"}));
-        }
-
-        let mention_required = config.require_mention.unwrap_or(true);
-        let bot_name = config
-            .bot_display_name
-            .as_deref()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or("ironclaw");
-
-        if mention_required && !is_mention_for_bot(&rendered, bot_name) {
-            return json_response(200, serde_json::json!({"ok": true, "ignored": "no-mention"}));
-        }
-
-        let prompt = if mention_required {
-            strip_mention(&rendered, bot_name)
+        let body_value = if let Some(reply_to) = reply_to {
+            serde_json::json!({ "message": text, "replyTo": reply_to })
         } else {
-            rendered.clone()
+            serde_json::json!({ "message": text })
         };
+        let body = serde_json::to_vec(&body_value)
+            .map_err(|err| format!("nextcloud-talk: failed to encode outbound body: {err}"))?;
 
-        let actor_id = event.actor.as_ref().and_then(|a| a.id.clone());
-        let actor_name = event.actor.as_ref().and_then(|a| a.name.clone());
-        let message_id = event
-            .object
-            .as_ref()
-            .and_then(|obj| obj.id.as_deref())
-            .and_then(|id| id.parse::<u64>().ok());
-
-        let metadata = NextcloudMetadata {
-            room_token: room_token.clone(),
-            message_id,
-            actor_id: actor_id.clone(),
-        };
-
-        let metadata_json = match serde_json::to_string(&metadata) {
-            Ok(v) => v,
-            Err(err) => {
-                channel_host::log(
-                    channel_host::LogLevel::Error,
-                    &format!("nextcloud-talk: metadata encode failed: {}", err),
-                );
-                return json_response(500, serde_json::json!({"error": "metadata encode failed"}));
-            }
-        };
-
-        channel_host::emit_message(&EmittedMessage {
-            user_id: format!(
-                "nc:{}",
-                actor_id.clone().unwrap_or_else(|| "unknown".to_string())
-            ),
-            user_name: actor_name,
-            content: if prompt.trim().is_empty() {
-                rendered
-            } else {
-                prompt
-            },
-            thread_id: Some(format!("nextcloud:room:{}", room_token)),
-            metadata_json,
-            attachments: vec![],
+        let path = format!("/ocs/v2.php/apps/spreed/api/v1/bot/{room_token}/message");
+        let request = serde_json::json!({
+            "egress_target_index": 0,
+            "method": "POST",
+            "path": path,
+            "headers": [
+                { "name": "Content-Type", "value": "application/json" },
+                { "name": "Accept", "value": "application/json" },
+                { "name": "OCS-APIRequest", "value": "true" }
+            ],
+            "body": body
         });
 
-        json_response(200, serde_json::json!({"ok": true, "queued": "create"}))
-    }
-
-    fn on_poll() {}
-
-    fn on_respond(response: AgentResponse) -> Result<(), String> {
-        let metadata: NextcloudMetadata = serde_json::from_str(&response.metadata_json)
-            .map_err(|e| format!("Failed to parse response metadata: {}", e))?;
-
-        let config = load_config();
-        let base_url = config
-            .base_url
-            .as_ref()
-            .map(|s| s.trim().trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Missing base_url in channel config".to_string())?;
-
-        let bot_secret = config
-            .bot_secret
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Missing bot_secret in channel config".to_string())?;
-
-        send_bot_message(
-            &base_url,
-            &bot_secret,
-            &metadata.room_token,
-            &response.content,
-            metadata.message_id,
-        )
-    }
-
-    fn on_status(_update: StatusUpdate) {}
-
-    fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
-        Err("broadcast not implemented for nextcloud-talk channel".to_string())
-    }
-
-    fn on_shutdown() {
-        channel_host::log(
-            channel_host::LogLevel::Info,
-            "nextcloud-talk channel shutting down",
-        );
+        Ok(OutboundRender {
+            egress_request_json: request.to_string(),
+        })
     }
 }
 
-fn load_config() -> NextcloudConfig {
-    channel_host::workspace_read(CONFIG_PATH)
-        .and_then(|raw| serde_json::from_str::<NextcloudConfig>(&raw).ok())
-        .unwrap_or_default()
+#[derive(Debug, Serialize)]
+struct ParsedInboundJson {
+    external_event_id: String,
+    external_actor_ref: ExternalActorRefJson,
+    external_conversation_ref: ExternalConversationRefJson,
+    payload: InboundPayloadJson,
 }
 
-fn parse_headers(raw: &str) -> HashMap<String, String> {
-    serde_json::from_str::<HashMap<String, String>>(raw)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v))
-        .collect()
+#[derive(Debug, Serialize)]
+struct ExternalActorRefJson {
+    kind: String,
+    id: String,
+    display_name: Option<String>,
 }
 
-fn backend_allowed(headers: &HashMap<String, String>, config: &NextcloudConfig) -> bool {
-    let Some(raw_allowlist) = config.backend_allowlist_raw.as_ref() else {
-        return true;
+#[derive(Debug, Serialize)]
+struct ExternalConversationRefJson {
+    space_id: Option<String>,
+    conversation_id: String,
+    topic_id: Option<String>,
+    reply_target_message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InboundPayloadJson {
+    UserMessage(UserMessagePayloadJson),
+    NoOp,
+}
+
+#[derive(Debug, Serialize)]
+struct UserMessagePayloadJson {
+    text: String,
+    attachments: Vec<serde_json::Value>,
+    trigger: TriggerReasonJson,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TriggerReasonJson {
+    DirectChat,
+    BotMention,
+}
+
+fn build_noop_inbound(event: &TalkEvent) -> Result<String, String> {
+    let actor_id = event
+        .actor
+        .as_ref()
+        .and_then(|a| a.id.clone())
+        .unwrap_or_else(|| "unknown-actor".to_string());
+    let room_token = extract_room_token(event).unwrap_or_else(|| "unknown-room".to_string());
+    let event_id = event
+        .object
+        .as_ref()
+        .and_then(|obj| obj.id.clone())
+        .unwrap_or_else(|| format!("event:{}:{room_token}:{actor_id}", event.event_type));
+
+    let payload = ParsedInboundJson {
+        external_event_id: event_id,
+        external_actor_ref: ExternalActorRefJson {
+            kind: "nextcloud_user".to_string(),
+            id: actor_id,
+            display_name: event.actor.as_ref().and_then(|a| a.name.clone()),
+        },
+        external_conversation_ref: ExternalConversationRefJson {
+            space_id: None,
+            conversation_id: room_token,
+            topic_id: None,
+            reply_target_message_id: None,
+        },
+        payload: InboundPayloadJson::NoOp,
     };
-
-    let allowlist: Vec<String> = raw_allowlist
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
-
-    if allowlist.is_empty() {
-        return true;
-    }
-
-    let backend = headers
-        .get("x-nextcloud-talk-backend")
-        .map(|s| s.trim())
-        .unwrap_or("");
-
-    if backend.is_empty() {
-        return false;
-    }
-
-    if let Ok(parsed) = url::Url::parse(backend) {
-        if let Some(host) = parsed.host_str() {
-            return allowlist.iter().any(|entry| entry == &host.to_ascii_lowercase());
-        }
-    }
-
-    allowlist.iter().any(|entry| entry == &backend.to_ascii_lowercase())
+    serde_json::to_string(&payload)
+        .map_err(|err| format!("nextcloud-talk: failed to encode no-op inbound payload: {err}"))
 }
 
-fn verify_nextcloud_signature(
-    headers: &HashMap<String, String>,
-    body: &[u8],
-    bot_secret: &str,
-) -> bool {
-    let random = match headers.get("x-nextcloud-talk-random") {
-        Some(v) if !v.trim().is_empty() => v.trim(),
-        _ => return false,
+fn build_user_message_inbound(
+    event: &TalkEvent,
+    room_token: String,
+    text: String,
+) -> Result<String, String> {
+    let actor_id = event
+        .actor
+        .as_ref()
+        .and_then(|a| a.id.clone())
+        .unwrap_or_else(|| "unknown-actor".to_string());
+    let message_id = event.object.as_ref().and_then(|obj| obj.id.clone());
+    let event_id = message_id
+        .clone()
+        .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
+
+    let payload = ParsedInboundJson {
+        external_event_id: event_id,
+        external_actor_ref: ExternalActorRefJson {
+            kind: "nextcloud_user".to_string(),
+            id: actor_id,
+            display_name: event.actor.as_ref().and_then(|a| a.name.clone()),
+        },
+        external_conversation_ref: ExternalConversationRefJson {
+            space_id: None,
+            conversation_id: room_token,
+            topic_id: None,
+            reply_target_message_id: message_id,
+        },
+        payload: InboundPayloadJson::UserMessage(UserMessagePayloadJson {
+            text,
+            attachments: vec![],
+            trigger: TriggerReasonJson::BotMention,
+        }),
     };
-
-    let signature = match headers.get("x-nextcloud-talk-signature") {
-        Some(v) if !v.trim().is_empty() => v.trim().to_ascii_lowercase(),
-        _ => return false,
-    };
-
-    let mut payload = Vec::with_capacity(random.len() + body.len());
-    payload.extend_from_slice(random.as_bytes());
-    payload.extend_from_slice(body);
-
-    let expected = hmac_sha256_hex(bot_secret, &payload);
-    constant_time_eq_ascii(&expected, &signature)
-}
-
-fn hmac_sha256_hex(secret: &str, payload: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap_or_else(|_| {
-        HmacSha256::new_from_slice(&[]).expect("HMAC can be initialized with empty key")
-    });
-    mac.update(payload);
-    hex::encode(mac.finalize().into_bytes())
-}
-
-fn constant_time_eq_ascii(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let mut diff = 0u8;
-    for (x, y) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    serde_json::to_string(&payload)
+        .map_err(|err| format!("nextcloud-talk: failed to encode parsed inbound payload: {err}"))
 }
 
 fn extract_room_token(event: &TalkEvent) -> Option<String> {
@@ -477,79 +405,7 @@ fn strip_mention(text: &str, bot_name: &str) -> String {
     cleaned.trim().to_string()
 }
 
-fn send_bot_message(
-    base_url: &str,
-    bot_secret: &str,
-    room_token: &str,
-    message: &str,
-    reply_to: Option<u64>,
-) -> Result<(), String> {
-    let endpoint = format!(
-        "{}/ocs/v2.php/apps/spreed/api/v1/bot/{}/message",
-        base_url, room_token
-    );
-
-    let payload = if let Some(reply_to) = reply_to {
-        serde_json::json!({
-            "message": message,
-            "replyTo": reply_to,
-        })
-    } else {
-        serde_json::json!({
-            "message": message,
-        })
-    };
-
-    let payload_bytes = serde_json::to_vec(&payload)
-        .map_err(|e| format!("Failed to serialize Nextcloud payload: {}", e))?;
-
-    let mut random_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut random_bytes);
-    let random = hex::encode(random_bytes);
-
-    let mut signature_payload = Vec::with_capacity(random.len() + payload_bytes.len());
-    signature_payload.extend_from_slice(random.as_bytes());
-    signature_payload.extend_from_slice(&payload_bytes);
-    let signature = hmac_sha256_hex(bot_secret, &signature_payload);
-
-    let headers = serde_json::json!({
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "OCS-APIRequest": "true",
-        "X-Nextcloud-Talk-Bot-Random": random,
-        "X-Nextcloud-Talk-Bot-Signature": signature,
-    });
-
-    let response = channel_host::http_request(
-        "POST",
-        &endpoint,
-        &headers.to_string(),
-        Some(&payload_bytes),
-        None,
-    )
-    .map_err(|e| format!("Nextcloud send request failed: {}", e))?;
-
-    if response.status >= 200 && response.status < 300 {
-        return Ok(());
-    }
-
-    let body = String::from_utf8_lossy(&response.body);
-    Err(format!(
-        "Nextcloud bot send failed: HTTP {} {}",
-        response.status, body
-    ))
-}
-
-fn json_response(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
-    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
-    OutgoingHttpResponse {
-        status,
-        headers_json: r#"{"Content-Type":"application/json"}"#.to_string(),
-        body: bytes,
-    }
-}
-
-export!(NextcloudTalkChannel);
+export!(NextcloudTalkAdapter);
 
 #[cfg(test)]
 mod tests {
@@ -562,8 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn signature_hash_matches_for_known_input() {
-        let sig = hmac_sha256_hex("secret", b"abcd");
-        assert_eq!(sig, "3057ecbaeceffb90b97394a97267236eca9f9e5520dfe387831a22a0eb7709d2");
+    fn strips_mentions() {
+        assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
     }
 }
