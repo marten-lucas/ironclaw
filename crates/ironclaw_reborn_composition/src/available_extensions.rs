@@ -86,6 +86,9 @@ pub(crate) struct AvailableExtensionPackage {
     /// each loader parses the manifest exactly once (see
     /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
     pub(crate) surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
+    /// ProductAdapter credential handles declared in host-api sections.
+    /// These are projected as manual-token setup requirements in lifecycle/UI.
+    pub(crate) product_adapter_required_credentials: Vec<String>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }
 
@@ -207,6 +210,28 @@ fn credential_requirements(
                 setup,
             });
         }
+    }
+    for handle in &package.product_adapter_required_credentials {
+        let Ok(provider) = RuntimeCredentialAccountProviderId::new(handle.clone()) else {
+            continue;
+        };
+        if let Some(seen) = groups.iter_mut().find(|seen| {
+            seen.handle == *handle
+                && seen.provider == provider
+                && matches!(
+                    seen.setup,
+                    LifecycleExtensionCredentialSetup::ManualToken
+                )
+        }) {
+            seen.required = true;
+            continue;
+        }
+        groups.push(CredentialRequirementGroup {
+            handle: handle.clone(),
+            provider,
+            required: true,
+            setup: LifecycleExtensionCredentialSetup::ManualToken,
+        });
     }
     groups
         .iter()
@@ -588,6 +613,8 @@ fn bundled_extension_package(
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
+    let product_adapter_required_credentials =
+        product_adapter_required_credentials_from_manifest_record(&record, label)?;
     let manifest = record.manifest().clone().try_into().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -603,6 +630,7 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         package,
         surface_kinds,
+        product_adapter_required_credentials,
         assets,
     })
 }
@@ -624,6 +652,27 @@ fn surface_kinds_from_manifest_record(
         surface_kinds.push(LifecycleExtensionSurfaceKind::ExternalChannel);
     }
     Ok(surface_kinds)
+}
+
+fn product_adapter_required_credentials_from_manifest_record(
+    record: &ExtensionManifestRecord,
+    label: &str,
+) -> Result<Vec<String>, ProductWorkflowError> {
+    let adapters = product_adapter_sections(record).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
+        }
+    })?;
+    let mut handles = Vec::new();
+    for adapter in adapters {
+        for handle in adapter.required_credentials() {
+            let handle = handle.as_str().to_string();
+            if !handles.contains(&handle) {
+                handles.push(handle);
+            }
+        }
+    }
+    Ok(handles)
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -1442,6 +1491,8 @@ where
         )
         .map_err(map_binding_error)?;
         let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
+        let product_adapter_required_credentials =
+            product_adapter_required_credentials_from_manifest_record(&record, entry.name.as_str())?;
         let manifest = record
             .manifest()
             .clone()
@@ -1470,6 +1521,7 @@ where
             manifest_toml: record.raw_toml().to_string(),
             package,
             surface_kinds,
+            product_adapter_required_credentials,
             assets,
         });
     }
@@ -1983,6 +2035,13 @@ mod tests {
             summary.surface_kinds,
             vec![LifecycleExtensionSurfaceKind::ExternalChannel]
         );
+        assert_eq!(summary.credential_requirements.len(), 1);
+        assert_eq!(summary.credential_requirements[0].name, "slack_bot_token");
+        assert_eq!(summary.credential_requirements[0].provider, "slack_bot_token");
+        assert!(matches!(
+            summary.credential_requirements[0].setup,
+            LifecycleExtensionCredentialSetup::ManualToken
+        ));
         assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
     }
 
@@ -2299,11 +2358,22 @@ credential_handle = "channel_ext_token"
         assert_eq!(results.len(), 1, "filesystem manifest should be loaded");
 
         let package = results.into_iter().next().unwrap();
+        let summary = package.summary();
         assert_eq!(
-            package.summary().surface_kinds,
+            summary.surface_kinds,
             vec![LifecycleExtensionSurfaceKind::ExternalChannel],
             "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
         );
+        assert_eq!(summary.credential_requirements.len(), 1);
+        assert_eq!(summary.credential_requirements[0].name, "channel_ext_token");
+        assert_eq!(
+            summary.credential_requirements[0].provider,
+            "channel_ext_token"
+        );
+        assert!(matches!(
+            summary.credential_requirements[0].setup,
+            LifecycleExtensionCredentialSetup::ManualToken
+        ));
     }
 
     #[derive(Default)]
@@ -2481,6 +2551,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             package,
             surface_kinds: Vec::new(),
+            product_adapter_required_credentials: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
