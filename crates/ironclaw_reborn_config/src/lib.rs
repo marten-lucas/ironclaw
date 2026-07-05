@@ -40,7 +40,7 @@ pub use budget::{
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
     HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, PolicySection,
-    REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
+    NextcloudTalkSection, REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
     RebornConfigFileUpdateError, RunnerSection, SlackChannelRouteSection, SlackSection,
     StorageBackend, StorageSection, TriggerPollerConfigSection, begin_default_llm_slot_update,
     update_default_llm_slot,

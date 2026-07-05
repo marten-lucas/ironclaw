@@ -14,7 +14,8 @@ use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
     LocalTriggerAccessSource, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    build_reborn_runtime, open_local_trigger_access_store, webui_v2_app_with_lifecycle,
+    build_nextcloud_talk_route_mount, build_reborn_runtime, open_local_trigger_access_store,
+    webui_v2_app_with_lifecycle,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
@@ -177,6 +178,15 @@ impl ServeCommand {
             &user_id,
             &boot_config.home().config_file_path(),
         )?;
+        let nextcloud_talk_config =
+            crate::commands::serve_nextcloud::resolve_nextcloud_talk_config_for_serve(
+                config_file.as_ref().and_then(|file| file.nextcloud_talk.as_ref()),
+                &tenant_id,
+                &default_agent_id,
+                default_project_id.as_ref(),
+                &user_id,
+                &boot_config.home().config_file_path(),
+            )?;
         #[cfg(not(feature = "slack-v2-host-beta"))]
         let _ = slack_host_beta_config;
 
@@ -454,6 +464,11 @@ impl ServeCommand {
             #[cfg(feature = "openai-compat-beta")]
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
+            }
+            if let Some(nextcloud_talk_config) = nextcloud_talk_config {
+                let nextcloud_mount = build_nextcloud_talk_route_mount(&runtime, nextcloud_talk_config)
+                    .context("failed to compose Nextcloud Talk webhook route")?;
+                serve_config = serve_config.with_public_route_mount(nextcloud_mount);
             }
             if let Some(google_oauth) = resolve_google_oauth_config_from_env()
                 .context("failed to resolve Google OAuth setup config for WebUI")?

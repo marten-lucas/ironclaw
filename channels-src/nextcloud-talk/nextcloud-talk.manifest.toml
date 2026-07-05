@@ -28,5 +28,5 @@ flags = ["inbound_messages", "external_final_reply_push", "delivery_status_repor
 handle = "nextcloud_talk_bot_secret"
 
 [[product_adapter.inbound.egress]]
-host = "nextcloud.local"
+host = "next.cloud.kiga-gramschatz.de"
 credential_handle = "nextcloud_talk_bot_secret"

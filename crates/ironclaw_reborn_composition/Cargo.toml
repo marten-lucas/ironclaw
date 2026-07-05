@@ -43,6 +43,7 @@ webui-v2-beta = [
     "ironclaw_webui_v2_static/webui-v2-beta",
     "dep:ironclaw_reborn_identity",
     "ironclaw_reborn/webui-user-store",
+    "ironclaw_product_adapters/host-auth-mint",
     "libsql",
     "dep:axum",
     "dep:tower",
@@ -156,6 +157,7 @@ lru = { version = "0.16", optional = true }
 fs4 = "0.6"
 rand = "0.8"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+regex = "1"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

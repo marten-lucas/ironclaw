@@ -88,6 +88,13 @@ pub struct RebornConfigFile {
     /// Slack host-beta feature. Secrets are env-only; this section stores
     /// IDs and environment variable names.
     pub slack: Option<SlackSection>,
+    /// Nextcloud Talk direct-channel route settings.
+    ///
+    /// This section defines host wiring for a native Nextcloud webhook path
+    /// so deployments can migrate away from the external bridge service.
+    /// Channel credentials remain product-auth managed; this section carries
+    /// only routing and non-secret behavior flags.
+    pub nextcloud_talk: Option<NextcloudTalkSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
@@ -330,6 +337,33 @@ pub struct SlackSection {
 pub struct SlackChannelRouteSection {
     pub channel_id: Option<String>,
     pub subject_user_id: Option<String>,
+}
+
+/// Nextcloud Talk direct-channel host configuration.
+///
+/// `enabled = true` is required before the standalone Reborn listener mounts
+/// a Nextcloud Talk webhook route. Secret material stays in product-auth
+/// credentials (`nextcloud_talk_bot_secret`) and is not stored here.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NextcloudTalkSection {
+    /// Explicit enablement gate for a native Nextcloud webhook route.
+    pub enabled: Option<bool>,
+    /// Extension id hosting the product-adapter implementation.
+    /// Defaults to `nextcloud-talk` in composition.
+    pub extension_id: Option<String>,
+    /// Public webhook path mounted by the listener.
+    /// Example: `/webhooks/nextcloud/talk`.
+    pub webhook_path: Option<String>,
+    /// Canonical Nextcloud base URL used for outbound API calls.
+    pub base_url: Option<String>,
+    /// Allowed `X-Nextcloud-Talk-Backend` hosts for inbound requests.
+    #[serde(default)]
+    pub backend_allowlist: Vec<String>,
+    /// Bot display name used for mention stripping in fallback flows.
+    pub bot_name: Option<String>,
+    /// Mention match expression for mention-only mode.
+    pub mention_regex: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -812,6 +846,35 @@ impl RebornConfigFile {
                 check(Cow::Borrowed("slack.bot_token_env"), bot_token_env)?;
             }
         }
+        if let Some(nextcloud) = &self.nextcloud_talk {
+            if let Some(extension_id) = &nextcloud.extension_id {
+                check(Cow::Borrowed("nextcloud_talk.extension_id"), extension_id)?;
+            }
+            if let Some(webhook_path) = &nextcloud.webhook_path {
+                check_non_empty_trimmed(
+                    Cow::Borrowed("nextcloud_talk.webhook_path"),
+                    webhook_path,
+                )?;
+            }
+            if let Some(base_url) = &nextcloud.base_url {
+                check(Cow::Borrowed("nextcloud_talk.base_url"), base_url)?;
+            }
+            if let Some(bot_name) = &nextcloud.bot_name {
+                check_non_empty_trimmed(Cow::Borrowed("nextcloud_talk.bot_name"), bot_name)?;
+            }
+            if let Some(mention_regex) = &nextcloud.mention_regex {
+                check_non_empty_trimmed(
+                    Cow::Borrowed("nextcloud_talk.mention_regex"),
+                    mention_regex,
+                )?;
+            }
+            for (index, host) in nextcloud.backend_allowlist.iter().enumerate() {
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("nextcloud_talk.backend_allowlist[{index}]")),
+                    host,
+                )?;
+            }
+        }
         if let Some(budget) = &self.budget {
             if let Some(tz) = &budget.default_tz {
                 check(Cow::Borrowed("budget.default_tz"), tz)?;
@@ -1193,6 +1256,15 @@ bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 [[slack.channel_routes]]
 channel_id = "CENG"
 subject_user_id = "eng-team-agent"
+
+[nextcloud_talk]
+enabled = true
+extension_id = "nextcloud-talk"
+webhook_path = "/webhooks/nextcloud/talk"
+base_url = "https://next.cloud.example"
+backend_allowlist = ["next.cloud.example"]
+bot_name = "IronClaw"
+mention_regex = "@ironclaw"
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1242,6 +1314,20 @@ subject_user_id = "eng-team-agent"
             slack.signing_secret_env.as_deref(),
             Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
         );
+        let nextcloud = cfg
+            .nextcloud_talk
+            .as_ref()
+            .expect("nextcloud_talk section present");
+        assert_eq!(nextcloud.enabled, Some(true));
+        assert_eq!(
+            nextcloud.extension_id.as_deref(),
+            Some("nextcloud-talk")
+        );
+        assert_eq!(
+            nextcloud.webhook_path.as_deref(),
+            Some("/webhooks/nextcloud/talk")
+        );
+        assert_eq!(nextcloud.backend_allowlist, vec!["next.cloud.example"]);
     }
 
     #[test]

@@ -74,6 +74,8 @@ mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_talk_serve;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
@@ -221,6 +223,10 @@ pub use nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
+#[cfg(feature = "webui-v2-beta")]
+pub use nextcloud_talk_serve::{
+    NextcloudTalkBuildError, NextcloudTalkRouteConfig, build_nextcloud_talk_route_mount,
+};
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
