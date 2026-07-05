@@ -4,6 +4,7 @@ use ironclaw_auth::{AuthProductScope, CredentialAccountUpdateBinding};
 use ironclaw_host_api::ExtensionId;
 use secrecy::SecretString;
 use serde::Deserialize;
+use url::Url;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
@@ -148,6 +149,7 @@ async fn submit_manual_token_requirement(
         }
         return Ok(());
     }
+    let normalized = normalize_manual_secret_for_requirement(requirement, trimmed)?;
     service
         .submit_manual_token(ExtensionCredentialSubmitRequest {
             scope,
@@ -157,10 +159,38 @@ async fn submit_manual_token_requirement(
             existing_account: existing
                 .as_ref()
                 .map(CredentialAccountUpdateBinding::from_projection),
-            secret: SecretString::from(trimmed.to_string()),
+            secret: SecretString::from(normalized),
         })
         .await?;
     Ok(())
+}
+
+fn normalize_manual_secret_for_requirement(
+    requirement: &LifecycleExtensionCredentialRequirement,
+    raw_secret: &str,
+) -> Result<String, RebornServicesError> {
+    if requirement.provider == "nextcloud_talk_base_url" {
+        let parsed = Url::parse(raw_secret)
+            .map_err(|_| validation_error("secrets", WebUiInboundValidationCode::InvalidValue))?;
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(validation_error(
+                "secrets",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
+        let mut normalized = parsed.to_string();
+        while normalized.ends_with('/') {
+            normalized.pop();
+        }
+        return Ok(normalized);
+    }
+    Ok(raw_secret.to_string())
 }
 
 fn setup_projection(
@@ -183,6 +213,12 @@ fn setup_projection(
 }
 
 fn credential_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String {
+    if requirement.provider == "nextcloud_talk_base_url" {
+        return "Nextcloud base URL (example: https://cloud.example.tld)".to_string();
+    }
+    if requirement.provider == "nextcloud_talk_bot_secret" {
+        return "Nextcloud Talk bot secret from occ talk:bot:install".to_string();
+    }
     format!("{} credential", requirement.provider)
 }
 
