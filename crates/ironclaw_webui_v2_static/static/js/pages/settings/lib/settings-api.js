@@ -121,7 +121,37 @@ export function removeSkill(name) {
 // authenticated caller. The response is the contributor-local view as
 // of the last credit sync; the authoritative ledger is server-side.
 export function fetchTraceCredits() {
-  return apiFetch("/api/webchat/v2/traces/credit");
+  return apiFetch("/api/webchat/v2/traces/credit").catch((error) => {
+    if (error && error.name === "ApiError" && isTraceCreditsFallbackStatus(error.status)) {
+      return emptyTraceCredits();
+    }
+    throw error;
+  });
+}
+
+function isTraceCreditsFallbackStatus(status) {
+  return status === 401 || status === 403 || status === 502 || status === 503 || status === 504;
+}
+
+function emptyTraceCredits() {
+  return {
+    enrolled: false,
+    pending_credit: 0,
+    final_credit: 0,
+    delayed_credit_delta: 0,
+    submissions_total: 0,
+    submissions_submitted: 0,
+    submissions_accepted: 0,
+    submissions_revoked: 0,
+    submissions_expired: 0,
+    credit_events_total: 0,
+    last_submission_at: null,
+    last_credit_sync_at: null,
+    recent_explanations: [],
+    manual_review_hold_count: 0,
+    holds: [],
+    note: "Trace Commons credits are unavailable right now.",
+  };
 }
 // Authorize a held (manual-review) trace for submission. No request body —
 // the submission id is in the path. Returns { authorized: bool }.
