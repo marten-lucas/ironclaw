@@ -200,6 +200,10 @@ pub trait OperatorStatusService: Send + Sync {
     ) -> Result<RebornOperatorStatusResponse, RebornServicesError>;
 }
 
+pub trait ExtensionRuntimeStatusService: Send + Sync {
+    fn runtime_status(&self, package_id: &str) -> Option<String>;
+}
+
 #[derive(Debug, Clone)]
 pub struct StaticOperatorStatusService {
     response: RebornOperatorStatusResponse,
@@ -231,6 +235,32 @@ impl OperatorStatusService for UnsupportedOperatorStatusService {
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
         Err(operator_surface_unavailable())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct StaticExtensionRuntimeStatusService {
+    statuses: HashMap<String, String>,
+}
+
+impl StaticExtensionRuntimeStatusService {
+    pub fn new(statuses: HashMap<String, String>) -> Self {
+        Self { statuses }
+    }
+}
+
+impl ExtensionRuntimeStatusService for StaticExtensionRuntimeStatusService {
+    fn runtime_status(&self, package_id: &str) -> Option<String> {
+        self.statuses.get(package_id).cloned()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedExtensionRuntimeStatusService;
+
+impl ExtensionRuntimeStatusService for UnsupportedExtensionRuntimeStatusService {
+    fn runtime_status(&self, _package_id: &str) -> Option<String> {
+        None
     }
 }
 
@@ -1629,6 +1659,7 @@ pub struct RebornServices {
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
+    extension_runtime_status: Arc<dyn ExtensionRuntimeStatusService>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
@@ -1664,6 +1695,7 @@ impl RebornServices {
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
+            extension_runtime_status: Arc::new(UnsupportedExtensionRuntimeStatusService),
             skill_activation_recorder: None,
             skill_activation_clearer: None,
             llm_config: None,
@@ -1779,6 +1811,14 @@ impl RebornServices {
         operator_status: Arc<dyn OperatorStatusService>,
     ) -> Self {
         self.operator_status = operator_status;
+        self
+    }
+
+    pub fn with_extension_runtime_status_service(
+        mut self,
+        extension_runtime_status: Arc<dyn ExtensionRuntimeStatusService>,
+    ) -> Self {
+        self.extension_runtime_status = extension_runtime_status;
         self
     }
 
@@ -2861,6 +2901,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.extension_runtime_status),
             caller,
         )
         .await

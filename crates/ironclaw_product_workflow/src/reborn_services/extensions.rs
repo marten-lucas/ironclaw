@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    ExtensionCredentialSetupService,
+    ExtensionCredentialSetupService, ExtensionRuntimeStatusService,
     extension_credentials::{
         ExtensionCredentialReadiness, credential_scope, readiness_for_requirements,
     },
@@ -26,6 +26,7 @@ const EXTENSION_READINESS_CONCURRENCY: usize = 8;
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
+    extension_runtime_status: Arc<dyn ExtensionRuntimeStatusService>,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<RebornExtensionListResponse, RebornServicesError> {
     let context = lifecycle_surface_context(caller.clone());
@@ -37,7 +38,13 @@ pub(super) async fn list_extensions(
     .await?;
     let installed = lifecycle_installed_extensions(&lifecycle);
     Ok(RebornExtensionListResponse {
-        extensions: lifecycle_extension_infos(installed, extension_credentials, caller).await?,
+        extensions: lifecycle_extension_infos(
+            installed,
+            extension_credentials,
+            extension_runtime_status,
+            caller,
+        )
+        .await?,
     })
 }
 
@@ -192,12 +199,14 @@ fn lifecycle_installed_extensions(
 async fn lifecycle_extension_infos(
     installed: Vec<LifecycleInstalledExtensionSummary>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
+    extension_runtime_status: Arc<dyn ExtensionRuntimeStatusService>,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<Vec<RebornExtensionInfo>, RebornServicesError> {
     let resolved = stream::iter(installed)
         .map(|installed| {
             let caller = caller.clone();
             let extension_credentials = extension_credentials.clone();
+            let extension_runtime_status = extension_runtime_status.clone();
             async move {
                 let readiness = credential_readiness_for_extension(
                     extension_credentials.as_deref(),
@@ -205,7 +214,9 @@ async fn lifecycle_extension_infos(
                     &installed,
                 )
                 .await?;
-                Ok::<_, RebornServicesError>((installed, readiness))
+                let runtime_status = extension_runtime_status
+                    .runtime_status(installed.summary.package_ref.id.as_str());
+                Ok::<_, RebornServicesError>((installed, readiness, runtime_status))
             }
         })
         .buffered(EXTENSION_READINESS_CONCURRENCY)
@@ -213,7 +224,9 @@ async fn lifecycle_extension_infos(
         .await?;
     Ok(resolved
         .into_iter()
-        .map(|(installed, readiness)| extension_info(installed, readiness))
+        .map(|(installed, readiness, runtime_status)| {
+            extension_info(installed, readiness, runtime_status)
+        })
         .collect())
 }
 
@@ -254,6 +267,7 @@ async fn credential_readiness_for_extension(
 fn extension_info(
     installed: LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
+    runtime_status: Option<String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let has_auth = !installed.summary.credential_requirements.is_empty();
@@ -288,6 +302,7 @@ fn extension_info(
         activation_status: Some(phase_status(phase).to_string()),
         activation_error: None,
         version: Some(summary.version),
+        runtime_status,
         onboarding_state: onboarding.state,
         onboarding: onboarding.onboarding,
     }
@@ -364,6 +379,10 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
+        fn runtime_status_service() -> Arc<dyn ExtensionRuntimeStatusService> {
+            Arc::new(super::super::StaticExtensionRuntimeStatusService::default())
+        }
+
     use crate::{
         ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
         LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
@@ -430,7 +449,12 @@ mod tests {
         let caller = caller();
 
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
-        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller.clone())
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(credentials_service),
+            runtime_status_service(),
+            caller.clone(),
+        )
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
@@ -467,7 +491,12 @@ mod tests {
         };
         let credentials = UnavailableCredentials;
 
-        let response = list_extensions(Arc::new(facade), Some(Arc::new(credentials)), caller())
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(Arc::new(credentials)),
+            runtime_status_service(),
+            caller(),
+        )
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
@@ -494,7 +523,12 @@ mod tests {
         let credentials = Arc::new(ConcurrentCredentials::default());
         let credentials_service: Arc<dyn ExtensionCredentialSetupService> = credentials.clone();
 
-        let response = list_extensions(Arc::new(facade), Some(credentials_service), caller())
+        let response = list_extensions(
+            Arc::new(facade),
+            Some(credentials_service),
+            runtime_status_service(),
+            caller(),
+        )
             .await
             .expect("list extensions");
 
@@ -569,7 +603,7 @@ mod tests {
             },
         };
 
-        let response = list_extensions(Arc::new(facade), None, caller())
+        let response = list_extensions(Arc::new(facade), None, runtime_status_service(), caller())
             .await
             .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");

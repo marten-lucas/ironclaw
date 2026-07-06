@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, env, sync::Arc};
 
 use chrono::Utc;
 
@@ -9,11 +9,13 @@ use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
     RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
+    RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
-    WebUiAuthenticatedCaller,
+    StaticExtensionRuntimeStatusService, WebUiAuthenticatedCaller,
 };
+use ironclaw_reborn_config::{RebornBootConfig, RebornConfigFile};
 
 use ironclaw_triggers::TriggerRepository;
 
@@ -223,6 +225,11 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         services.readiness.clone(),
     )));
+    if let Ok(boot) = RebornBootConfig::resolve_from_env() {
+        api = api.with_extension_runtime_status_service(Arc::new(
+            boot_config_extension_runtime_status_service(&boot),
+        ));
+    }
     api = api.with_operator_logs_service(crate::operator_log_buffer());
 
     // Compose the operator LLM-config settings service when the runtime was
@@ -269,6 +276,36 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
     ) -> Result<RebornOperatorStatusResponse, RebornServicesError> {
         Ok(status_response_from_readiness(&self.readiness))
     }
+}
+
+fn boot_config_extension_runtime_status_service(
+    boot: &ironclaw_reborn_config::RebornBootConfig,
+) -> StaticExtensionRuntimeStatusService {
+    let mut statuses = HashMap::new();
+    let config = RebornConfigFile::load(&boot.home().config_file_path())
+        .ok()
+        .flatten();
+
+    if let Some(nextcloud) = config.as_ref().and_then(|cfg| cfg.nextcloud_talk.as_ref()) {
+        let status = if nextcloud.enabled == Some(true) {
+            if env::var("IRONCLAW_REBORN_NEXTCLOUD_TALK_BOT_SECRET")
+                .ok()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                "mounted"
+            } else {
+                "missing_secret"
+            }
+        } else {
+            "disabled"
+        };
+        statuses.insert("nextcloud-talk".to_string(), status.to_string());
+    } else {
+        statuses.insert("nextcloud-talk".to_string(), "disabled".to_string());
+    }
+
+    StaticExtensionRuntimeStatusService::new(statuses)
 }
 
 struct LocalSkillsProductFacade {

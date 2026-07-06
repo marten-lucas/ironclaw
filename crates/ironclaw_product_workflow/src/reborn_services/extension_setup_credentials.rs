@@ -340,13 +340,13 @@ mod tests {
         .await
         .expect("setup projection should render when credential status is unavailable");
 
-        assert_eq!(secrets.len(), 1);
-        assert_eq!(secrets[0].name, "google_oauth");
-        assert_eq!(secrets[0].provider, "google");
-        assert!(!secrets[0].provided);
-        assert!(secrets[0].credential_ref.is_none());
+        assert_eq!(secrets.secrets.len(), 1);
+        assert_eq!(secrets.secrets[0].name, "google_oauth");
+        assert_eq!(secrets.secrets[0].provider, "google");
+        assert!(!secrets.secrets[0].provided);
+        assert!(secrets.secrets[0].credential_ref.is_none());
         assert!(matches!(
-            secrets[0].setup,
+            secrets.secrets[0].setup,
             RebornExtensionCredentialSetup::OAuth { .. }
         ));
     }

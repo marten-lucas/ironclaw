@@ -1112,6 +1112,8 @@ pub struct RebornExtensionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,

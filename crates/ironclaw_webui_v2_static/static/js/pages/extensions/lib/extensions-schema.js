@@ -39,3 +39,15 @@ export const STATE_LABELS = {
   failed: "failed",
   installed: "installed",
 };
+
+export const RUNTIME_STATE_TONES = {
+  mounted: "success",
+  disabled: "muted",
+  missing_secret: "warning",
+};
+
+export const RUNTIME_STATE_LABELS = {
+  mounted: "route live",
+  disabled: "route off",
+  missing_secret: "route misconfigured",
+};

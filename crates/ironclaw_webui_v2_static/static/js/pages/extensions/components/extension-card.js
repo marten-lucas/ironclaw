@@ -5,6 +5,8 @@ import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import {
   KIND_LABELS,
+  RUNTIME_STATE_LABELS,
+  RUNTIME_STATE_TONES,
   STATE_TONES,
   STATE_LABELS,
   isChannelExtensionKind,
@@ -109,6 +111,9 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const state = ext.onboarding_state || ext.activation_status || (ext.active ? "active" : "installed");
   const tone = STATE_TONES[state] || "muted";
   const label = t(`extensions.state.${state}`) || STATE_LABELS[state] || state;
+  const runtimeState = isChannelExtensionKind(ext.kind) ? ext.runtime_status || null : null;
+  const runtimeTone = runtimeState ? RUNTIME_STATE_TONES[runtimeState] || "muted" : null;
+  const runtimeLabel = runtimeState ? RUNTIME_STATE_LABELS[runtimeState] || runtimeState : null;
   const kindLabel = t(`extensions.kind.${ext.kind}`) || KIND_LABELS[ext.kind] || ext.kind;
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
@@ -191,6 +196,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     <div className=${CARD}>
       <div className="flex items-start gap-2">
         <${Badge} tone=${tone} label=${label} size="sm" />
+        ${runtimeState && html`<${Badge} tone=${runtimeTone} label=${runtimeLabel} size="sm" />`}
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
           ${displayName}
         </span>
