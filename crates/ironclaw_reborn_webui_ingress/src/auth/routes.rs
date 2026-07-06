@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
@@ -34,8 +34,10 @@ use ironclaw_reborn_composition::PublicRouteMount;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
+use super::config::YunoHostPortalConfig;
 use super::error::OAuthError;
 use super::pending::{PendingFlowStore, SessionTicketStore, sanitize_redirect};
+use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
 use super::provider_name::OAuthProviderName;
 use super::user_directory::{UserDirectory, UserDirectoryError};
@@ -62,6 +64,7 @@ pub struct OAuthRouterConfig {
     pub session_store: Arc<dyn SessionStore>,
     pub user_directory: Arc<dyn UserDirectory>,
     pub providers: Vec<Arc<dyn OAuthProvider>>,
+    pub yunohost_portal: Option<YunoHostPortalConfig>,
     pub base_url: String,
     pub session_lifetime: ChronoDuration,
 }
@@ -80,9 +83,15 @@ impl OAuthRouterConfig {
             session_store,
             user_directory,
             providers,
+            yunohost_portal: None,
             base_url: base_url.into(),
             session_lifetime: DEFAULT_SESSION_LIFETIME,
         }
+    }
+
+    pub fn with_yunohost_portal(mut self, config: YunoHostPortalConfig) -> Self {
+        self.yunohost_portal = Some(config);
+        self
     }
 
     pub fn with_session_lifetime(mut self, lifetime: ChronoDuration) -> Self {
@@ -97,6 +106,7 @@ struct RouterState {
     session_store: Arc<dyn SessionStore>,
     user_directory: Arc<dyn UserDirectory>,
     providers: Vec<Arc<dyn OAuthProvider>>,
+    yunohost_portal: Option<YunoHostPortalConfig>,
     base_url: String,
     session_lifetime: ChronoDuration,
     pending: PendingFlowStore,
@@ -109,6 +119,10 @@ impl RouterState {
             .iter()
             .find(|p| p.name() == name)
             .map(Arc::clone)
+    }
+
+    fn yunohost_enabled(&self) -> bool {
+        self.yunohost_portal.is_some()
     }
 
     fn callback_url(&self, provider_name: &OAuthProviderName) -> String {
@@ -125,6 +139,12 @@ const PATH_LOGIN: &str = "/auth/login/{provider}";
 const PATH_CALLBACK: &str = "/auth/callback/{provider}";
 const PATH_SESSION_EXCHANGE: &str = "/auth/session/exchange";
 const PATH_LOGOUT: &str = "/auth/logout";
+
+const YUNOHOST_PROVIDER: &str = "yunohost";
+const YUNOHOST_SSO_PATH: &str = "/yunohost/sso/";
+const YUNOHOST_USER_HEADER: &str = "YNH_USER";
+const YUNOHOST_EMAIL_HEADER: &str = "YNH_USER_EMAIL";
+const YUNOHOST_FULLNAME_HEADER: &str = "YNH_USER_FULLNAME";
 
 const ROUTE_ID_PROVIDERS: &str = "webui.sso.providers";
 const ROUTE_ID_LOGIN: &str = "webui.sso.login";
@@ -166,6 +186,7 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
         session_store: config.session_store,
         user_directory: config.user_directory,
         providers: config.providers,
+        yunohost_portal: config.yunohost_portal,
         base_url: config.base_url,
         session_lifetime: config.session_lifetime,
         pending: PendingFlowStore::new(),
@@ -315,6 +336,9 @@ async fn providers_handler(State(state): State<RouterStateHandle>) -> Json<Provi
         .iter()
         .map(|p| p.name().as_str().to_string())
         .collect();
+    if state.yunohost_enabled() {
+        providers.push(YUNOHOST_PROVIDER.to_string());
+    }
     providers.sort_unstable();
     Json(ProvidersResponse { providers })
 }
@@ -336,7 +360,15 @@ async fn login_handler(
     State(state): State<RouterStateHandle>,
     Path(raw_provider): Path<String>,
     Query(params): Query<LoginParams>,
+    headers: HeaderMap,
 ) -> Response {
+    let redirect_after = sanitize_redirect(params.redirect_after);
+    if raw_provider == YUNOHOST_PROVIDER
+        && state.yunohost_enabled()
+    {
+        return yunohost_login_handler(state, redirect_after, &headers).await;
+    }
+
     // Validate at the boundary: an ill-formed `{provider}` segment
     // (path traversal, uppercase, oversized) fails closed before
     // any state-store mutation.
@@ -355,7 +387,6 @@ async fn login_handler(
             .into_response();
     };
 
-    let redirect_after = sanitize_redirect(params.redirect_after);
     let (csrf_state, flow) = state
         .pending
         .insert(provider.name().clone(), redirect_after);
@@ -365,6 +396,56 @@ async fn login_handler(
     let auth_url = provider.authorization_url(&callback_url, &csrf_state, &flow.code_challenge);
 
     Redirect::temporary(&auth_url).into_response()
+}
+
+async fn yunohost_login_handler(
+    state: RouterStateHandle,
+    redirect_after: Option<String>,
+    headers: &HeaderMap,
+) -> Response {
+    let provider_name = OAuthProviderName::new(YUNOHOST_PROVIDER)
+        .expect("crate-local YunoHost provider name must validate");
+    let retry_location = yunohost_sso_redirect(&state, redirect_after.as_deref());
+    let Some(profile) = yunohost_profile_from_trusted_headers(headers) else {
+        return Redirect::temporary(&retry_location).into_response();
+    };
+
+    issue_session_redirect(&state, &provider_name, profile, redirect_after.as_deref()).await
+}
+
+fn yunohost_sso_redirect(state: &RouterState, redirect_after: Option<&str>) -> String {
+    let mut return_to = format!("{}/auth/login/{YUNOHOST_PROVIDER}", state.base_url);
+    let redirect_after = redirect_after.unwrap_or(DEFAULT_REDIRECT_AFTER);
+    return_to.push_str("?redirect_after=");
+    return_to.push_str(&urlencoding::encode(redirect_after));
+    format!("{YUNOHOST_SSO_PATH}?r={}", urlencoding::encode(&return_to))
+}
+
+fn yunohost_profile_from_trusted_headers(headers: &HeaderMap) -> Option<OAuthUserProfile> {
+    // Trusted identity headers are expected only after YunoHost/SSOwat
+    // authenticated the request on the same host perimeter.
+    let user = header_value_trimmed(headers, YUNOHOST_USER_HEADER)?;
+    let email = header_value_trimmed(headers, YUNOHOST_EMAIL_HEADER);
+    let display_name = header_value_trimmed(headers, YUNOHOST_FULLNAME_HEADER)
+        .or_else(|| Some(user.to_string()));
+    let verified_emails = email.clone().into_iter().collect();
+
+    Some(OAuthUserProfile {
+        provider_user_id: user.to_string(),
+        email_verified: email.is_some(),
+        email,
+        verified_emails,
+        display_name,
+    })
+}
+
+fn header_value_trimmed(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 // ─── /auth/callback/{provider} ────────────────────────────────────────
@@ -445,9 +526,18 @@ async fn callback_handler(
         }
     };
 
+    issue_session_redirect(&state, &provider_name, profile, flow.redirect_after.as_deref()).await
+}
+
+async fn issue_session_redirect(
+    state: &RouterStateHandle,
+    provider_name: &OAuthProviderName,
+    profile: OAuthUserProfile,
+    redirect_after: Option<&str>,
+) -> Response {
     let user_id = match state
         .user_directory
-        .resolve(provider.name(), &profile)
+        .resolve(provider_name, &profile)
         .await
     {
         Ok(uid) => uid,
@@ -488,10 +578,7 @@ async fn callback_handler(
         }
     };
 
-    let redirect_after = flow
-        .redirect_after
-        .as_deref()
-        .unwrap_or(DEFAULT_REDIRECT_AFTER);
+    let redirect_after = redirect_after.unwrap_or(DEFAULT_REDIRECT_AFTER);
     let ticket = state.session_tickets.insert(bearer);
     let location = build_success_redirect(redirect_after, &ticket);
     Redirect::to(&location).into_response()

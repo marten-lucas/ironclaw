@@ -46,7 +46,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::{
-    OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, webui_v2_auth_router,
+    OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, YunoHostPortalConfig,
+    webui_v2_auth_router,
 };
 use crate::session::{
     SessionAuthenticator, SessionId, SessionRecord, SessionStore, SessionStoreError,
@@ -69,8 +70,10 @@ pub struct SignedSessionLoginConfig {
     /// Public base URL used to build provider callback URLs.
     pub base_url: String,
     /// Configured OAuth providers. An empty list disables the login
-    /// surface — [`build_signed_session_login`] returns `None`.
+    /// surface unless a host-native login provider is also configured.
     pub providers: Vec<Arc<dyn OAuthProvider>>,
+    /// Optional YunoHost portal-session bridge.
+    pub yunohost_portal: Option<YunoHostPortalConfig>,
     /// The host's existing env-bearer authenticator, composed alongside
     /// the session authenticator so scripted `Authorization: Bearer`
     /// workflows keep working next to browser login.
@@ -92,7 +95,7 @@ pub struct SignedSessionLoginWiring {
 pub fn build_signed_session_login(
     config: SignedSessionLoginConfig,
 ) -> Option<SignedSessionLoginWiring> {
-    if config.providers.is_empty() {
+    if config.providers.is_empty() && config.yunohost_portal.is_none() {
         return None;
     }
 
@@ -109,6 +112,11 @@ pub fn build_signed_session_login(
         config.providers,
         config.base_url,
     );
+    let router_config = if let Some(yunohost_portal) = config.yunohost_portal {
+        router_config.with_yunohost_portal(yunohost_portal)
+    } else {
+        router_config
+    };
     let mount = webui_v2_auth_router(router_config);
     let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
         session_authenticator,
@@ -707,6 +715,7 @@ mod tests {
             operator_secret: SecretString::from("operator-secret".to_string()),
             base_url: "https://app.example".to_string(),
             providers,
+            yunohost_portal: None,
             env_authenticator: Arc::new(OneToken {
                 token: "env-tok",
                 user: "operator",
@@ -726,5 +735,12 @@ mod tests {
             OAuthProviderName::new("google").expect("name"),
         ));
         assert!(build_signed_session_login(login_config(vec![provider])).is_some());
+    }
+
+    #[test]
+    fn build_signed_session_login_returns_wiring_when_yunohost_is_present() {
+        let mut config = login_config(Vec::new());
+        config.yunohost_portal = Some(YunoHostPortalConfig);
+        assert!(build_signed_session_login(config).is_some());
     }
 }

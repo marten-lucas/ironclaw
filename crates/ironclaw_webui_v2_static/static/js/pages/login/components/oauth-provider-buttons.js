@@ -4,6 +4,7 @@ import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 
 const OAUTH_PROVIDER_LABELS = {
+  yunohost: "YunoHost",
   google: "Google",
   github: "GitHub",
   apple: "Apple",

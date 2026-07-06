@@ -23,6 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use ironclaw_reborn_webui_ingress::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthProvider,
+    YunoHostPortalConfig,
 };
 use secrecy::SecretString;
 
@@ -37,6 +38,7 @@ pub(crate) static WEBUI_BASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mut
 /// the operator identity/secret and calls the ingress builder.
 pub(crate) struct SsoStartupConfig {
     pub(crate) providers: Vec<Arc<dyn OAuthProvider>>,
+    pub(crate) yunohost_portal: Option<YunoHostPortalConfig>,
     pub(crate) base_url: String,
     /// Lowercased verified-email domains allowed to log in. The host
     /// [`WebuiUserDirectory`](crate::commands::user_directory) admits a
@@ -45,6 +47,9 @@ pub(crate) struct SsoStartupConfig {
     /// it is never empty here in practice.
     pub(crate) allowed_email_domains: Vec<String>,
 }
+
+const YUNOHOST_TRUSTED_HEADERS_ENV: &str =
+    "IRONCLAW_REBORN_WEBUI_YUNOHOST_TRUSTED_HEADERS";
 
 /// Resolve the SSO startup config from environment, applying all
 /// startup-time SSO policy in one place: provider discovery, base-URL
@@ -58,7 +63,8 @@ pub(crate) fn sso_startup_config_from_env(
     listen_addr: SocketAddr,
 ) -> anyhow::Result<Option<SsoStartupConfig>> {
     let providers = oauth_providers_from_env()?;
-    if providers.is_empty() {
+    let yunohost_portal = yunohost_portal_from_env()?;
+    if providers.is_empty() && yunohost_portal.is_none() {
         return Ok(None);
     }
 
@@ -74,6 +80,7 @@ pub(crate) fn sso_startup_config_from_env(
 
     Ok(Some(SsoStartupConfig {
         providers,
+        yunohost_portal,
         base_url,
         allowed_email_domains,
     }))
@@ -260,6 +267,25 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     Ok(providers)
 }
 
+fn yunohost_portal_from_env() -> anyhow::Result<Option<YunoHostPortalConfig>> {
+    let Some(raw) = non_empty_env(YUNOHOST_TRUSTED_HEADERS_ENV) else {
+        return Ok(None);
+    };
+    if parse_enabled_flag(&raw) {
+        return Ok(Some(YunoHostPortalConfig));
+    }
+    anyhow::bail!(
+        "{YUNOHOST_TRUSTED_HEADERS_ENV} must be one of 1,true,yes,on when set"
+    )
+}
+
+fn parse_enabled_flag(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// Read an env var, returning `None` when it is unset or blank.
 fn non_empty_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|raw| !raw.trim().is_empty())
@@ -389,6 +415,7 @@ mod tests {
         "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD",
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
+        YUNOHOST_TRUSTED_HEADERS_ENV,
         WEBUI_BASE_URL_ENV,
         "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
     ];
@@ -487,6 +514,26 @@ mod tests {
         let resolved = sso_startup_config_from_env(addr("127.0.0.1:3000"))
             .expect("no provider configured is not an error");
         assert!(resolved.is_none(), "no CLIENT_ID → no SSO config mounted",);
+    }
+
+    #[test]
+    fn yunohost_trusted_headers_with_allowlist_mounts_sso_config() {
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        unsafe {
+            std::env::set_var(YUNOHOST_TRUSTED_HEADERS_ENV, "1");
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var(WEBUI_BASE_URL_ENV, "https://configured.example");
+        }
+
+        let resolved = sso_startup_config_from_env(addr("0.0.0.0:8080"))
+            .expect("configured portal and allowlist should start")
+            .expect("configured portal → Some(config)");
+        assert!(resolved.providers.is_empty());
+        assert!(resolved.yunohost_portal.is_some());
+        assert_eq!(resolved.base_url, "https://configured.example");
+
+        clear_sso_env();
     }
 
     #[test]

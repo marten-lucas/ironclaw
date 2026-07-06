@@ -53,3 +53,12 @@ pub struct GitHubOAuthConfig {
     /// cross-border path to `github.com` can raise it.
     pub http_timeout: Option<Duration>,
 }
+
+/// YunoHost trusted-header configuration.
+///
+/// This is not an OAuth code-flow provider. Instead, YunoHost/SSOwat
+/// protects the perimeter and injects trusted identity headers (such as
+/// `YNH_USER` / `YNH_USER_EMAIL`) on authenticated requests. The login
+/// route redeems those headers into an internal IronClaw session.
+#[derive(Debug, Clone)]
+pub struct YunoHostPortalConfig;

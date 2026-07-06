@@ -18,6 +18,7 @@ TAILWIND_VER="4.3.1"
 DOMPURIFY_VER="3.2.3"
 MARKED_VER="17.0.2"
 HLJS_VER="11.11.1"
+INCLUDE_SOURCE_MAPS="${IRONCLAW_WEBUI_VENDOR_SOURCE_MAPS:-0}"
 
 # A desktop browser UA so Google Fonts serves modern woff2 @font-face.
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -33,11 +34,63 @@ fetch() {
     -A "$UA" -o "$2" "$1"
 }
 
+resolve_source_map_url() {
+  local asset_url="$1"
+  local map_ref="$2"
+  local origin base_dir
+  if [[ "$map_ref" =~ ^https?:// ]]; then
+    printf '%s\n' "$map_ref"
+    return 0
+  fi
+  origin="$(printf '%s' "$asset_url" | sed -E 's#^(https?://[^/]+).*$#\1#')"
+  if [[ "$map_ref" == /* ]]; then
+    printf '%s%s\n' "$origin" "$map_ref"
+    return 0
+  fi
+  base_dir="${asset_url%/*}"
+  printf '%s/%s\n' "$base_dir" "$map_ref"
+}
+
+strip_source_map_comment() {
+  sed -i -E '/^[[:space:]]*\/\/# sourceMappingURL=/d;/^[[:space:]]*\/\*# sourceMappingURL=.*\*\/$/d' "$1"
+}
+
+rewrite_source_map_comment() {
+  local file="$1"
+  local new_ref="$2"
+  local escaped
+  escaped="$(printf '%s' "$new_ref" | sed 's/[\\/&]/\\&/g')"
+  sed -i -E "s#^[[:space:]]*//#[[:space:]]*sourceMappingURL=.*$#//# sourceMappingURL=${escaped}#" "$file"
+}
+
+finalize_source_map() {
+  local source_url="$1"
+  local dest="$2"
+  local map_ref map_url map_dest
+  map_ref="$(grep -oE 'sourceMappingURL=.*$' "$dest" | tail -n 1 | sed 's/^sourceMappingURL=//')"
+  [[ -z "$map_ref" ]] && return 0
+  if [[ "$INCLUDE_SOURCE_MAPS" != "1" ]]; then
+    strip_source_map_comment "$dest"
+    return 0
+  fi
+  map_url="$(resolve_source_map_url "$source_url" "$map_ref")"
+  map_dest="${dest}.map"
+  fetch "$map_url" "$map_dest"
+  rewrite_source_map_comment "$dest" "$(basename "$map_dest")"
+}
+
+vendor_js() {
+  local url="$1"
+  local dest="$2"
+  fetch "$url" "$dest"
+  finalize_source_map "$url" "$dest"
+}
+
 echo "Vendoring JS libraries…"
-fetch "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@${TAILWIND_VER}" "$VENDOR_DIR/tailwindcss-browser.js"
-fetch "https://cdnjs.cloudflare.com/ajax/libs/dompurify/${DOMPURIFY_VER}/purify.min.js" "$VENDOR_DIR/purify.min.js"
-fetch "https://cdn.jsdelivr.net/npm/marked@${MARKED_VER}/lib/marked.umd.min.js" "$VENDOR_DIR/marked.umd.min.js"
-fetch "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/${HLJS_VER}/highlight.min.js" "$VENDOR_DIR/highlight.min.js"
+vendor_js "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@${TAILWIND_VER}" "$VENDOR_DIR/tailwindcss-browser.js"
+vendor_js "https://cdnjs.cloudflare.com/ajax/libs/dompurify/${DOMPURIFY_VER}/purify.min.js" "$VENDOR_DIR/purify.min.js"
+vendor_js "https://cdn.jsdelivr.net/npm/marked@${MARKED_VER}/lib/marked.umd.min.js" "$VENDOR_DIR/marked.umd.min.js"
+vendor_js "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/${HLJS_VER}/highlight.min.js" "$VENDOR_DIR/highlight.min.js"
 
 echo "Vendoring Google Fonts…"
 RAW_CSS="$(curl -fsSL --max-time 60 -A "$UA" "https://fonts.googleapis.com/css2?${FONTS_QUERY}")"

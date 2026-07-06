@@ -26,6 +26,7 @@ import { rmSync } from "node:fs";
 const here = dirname(fileURLToPath(import.meta.url));
 const staticDir = resolve(here, "..", "static");
 const outdir = resolve(staticDir, "dist");
+const includeBundleSourceMaps = process.env.IRONCLAW_WEBUI_BUNDLE_SOURCE_MAPS === "1";
 
 // Clean stale chunks (hashed names accumulate across builds otherwise).
 rmSync(outdir, { recursive: true, force: true });
@@ -39,7 +40,7 @@ await build({
   platform: "browser",
   target: ["es2022"],
   minify: true,
-  sourcemap: false,
+  sourcemap: includeBundleSourceMaps ? "external" : false,
   legalComments: "none",
   // Bare specifiers (react, htm, …) live in this dir's node_modules,
   // but the importing source files sit under ../static/js, so esbuild's

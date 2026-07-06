@@ -1,12 +1,14 @@
-//! Host-owned OAuth login surface for the WebChat v2 gateway.
+//! Host-owned login surface for the WebChat v2 gateway.
 //!
 //! Composition mounts [`webui_v2_auth_router`] as a public route
 //! group alongside the bearer-protected WebChat v2 routes:
 //!
-//! - `GET  /auth/providers` — list configured OAuth providers (the
+//! - `GET  /auth/providers` — list configured login providers (the
 //!   SPA renders one button per entry).
-//! - `GET  /auth/login/{provider}` — initiate the OAuth flow; mints
-//!   a CSRF state + PKCE verifier and redirects to the provider.
+//! - `GET  /auth/login/{provider}` — initiate a configured login flow.
+//!   OAuth providers mint a CSRF state + PKCE verifier and redirect to
+//!   the upstream provider; host-native providers such as YunoHost may
+//!   complete directly from a trusted same-origin session cookie.
 //! - `GET  /auth/callback/{provider}` — exchange the code, resolve
 //!   the user through [`UserDirectory`], create a session via
 //!   [`SessionStore`](crate::SessionStore), and land the browser on
@@ -15,10 +17,11 @@
 //!   return the bearer over same-origin JSON.
 //! - `POST /auth/logout` — revoke the current session.
 //!
-//! The crate ships Google and GitHub providers today; NEAR wallet
-//! login (which does not fit the OAuth code flow) is still out of
-//! scope for this iteration of issue #4116. The [`OAuthProvider`]
-//! trait is the seam those plug into.
+//! The crate ships Google and GitHub OAuth providers plus a YunoHost
+//! portal-session bridge today; NEAR wallet login (which does not fit
+//! the OAuth code flow) is still out of scope for this iteration of
+//! issue #4116. The [`OAuthProvider`] trait remains the seam for the
+//! code-flow providers.
 
 mod config;
 mod error;
@@ -32,7 +35,7 @@ mod provider_name;
 mod routes;
 mod user_directory;
 
-pub use config::{GitHubOAuthConfig, GoogleOAuthConfig};
+pub use config::{GitHubOAuthConfig, GoogleOAuthConfig, YunoHostPortalConfig};
 pub use error::{OAuthError, ProviderInitError};
 pub use github::GitHubProvider;
 pub use google::GoogleProvider;

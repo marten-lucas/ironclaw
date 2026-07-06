@@ -13,21 +13,32 @@ pinned dependency:
 ```bash
 ./build.sh              # re-vendor CDN assets + npm ci + esbuild bundle
 ./build.sh --no-vendor  # just re-bundle (skip re-downloading vendored deps)
+IRONCLAW_WEBUI_VENDOR_SOURCE_MAPS=1 ./build.sh --no-vendor
+IRONCLAW_WEBUI_BUNDLE_SOURCE_MAPS=1 ./build.sh --no-vendor
 ```
 
 Then **commit** the changed files under `../static/dist/` and
 `../static/vendor/`. If you change JS without rebuilding, the served app
 keeps using the stale committed bundle.
 
+By default, vendored JS has its `sourceMappingURL` comment stripped so
+production browsers do not emit 404 noise for missing third-party maps.
+Set `IRONCLAW_WEBUI_VENDOR_SOURCE_MAPS=1` to fetch and rewrite vendor
+maps to local same-origin `.map` files, and set
+`IRONCLAW_WEBUI_BUNDLE_SOURCE_MAPS=1` to emit an external esbuild map
+for `app.js` during a debug build.
+
 ## What it produces
 
 | Output | Made by | Loaded in index.html as |
 |---|---|---|
 | `static/dist/app.js` + `static/dist/chunks/*` | `build.mjs` (esbuild) | `<script type="module" src="/v2/dist/app.js">` |
+| `static/dist/app.js.map` | `build.mjs` when `IRONCLAW_WEBUI_BUNDLE_SOURCE_MAPS=1` | sourcemap for debug builds |
 | `static/vendor/tailwindcss-browser.js` | `vendor.sh` | `<script>` |
 | `static/vendor/purify.min.js` | `vendor.sh` | `<script>` (window.DOMPurify) |
 | `static/vendor/marked.umd.min.js` | `vendor.sh` | `<script>` (window.marked) |
 | `static/vendor/highlight.min.js` | `vendor.sh` | `<script>` (window.hljs) |
+| `static/vendor/*.js.map` | `vendor.sh` when `IRONCLAW_WEBUI_VENDOR_SOURCE_MAPS=1` | sourcemaps for vendored JS |
 | `static/vendor/fonts/fonts.css` + `*.woff2` | `vendor.sh` | `<link rel="stylesheet">` |
 
 ## What is intentionally NOT bundled

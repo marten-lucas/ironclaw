@@ -106,9 +106,10 @@ pub(crate) async fn build_webui_auth_surface(
         operator_secret: session_signing_secret,
         base_url: sso.base_url,
         providers: sso.providers,
+        yunohost_portal: sso.yunohost_portal,
         env_authenticator,
     })
-    .expect("non-empty providers always produce login wiring"); // safety: sso_startup_config_from_env returns None when providers is empty, so this Some(sso) arm always has a non-empty provider list
+    .expect("configured login mechanisms always produce login wiring"); // safety: sso_startup_config_from_env returns None only when both OAuth providers and YunoHost portal login are absent
 
     eprintln!(
         "ironclaw-reborn: WebChat v2 SSO login mounted — \
@@ -199,6 +200,7 @@ mod tests {
         // surface must refuse to start rather than fall back or panic.
         let sso = SsoStartupConfig {
             providers: Vec::new(),
+            yunohost_portal: Some(ironclaw_reborn_webui_ingress::YunoHostPortalConfig),
             base_url: "https://app.example.com".to_string(),
             allowed_email_domains: vec!["example.com".to_string()],
         };
@@ -259,6 +261,7 @@ mod tests {
             providers: vec![Arc::new(StubProvider(
                 OAuthProviderName::new("google").expect("provider name"),
             ))],
+            yunohost_portal: None,
             base_url: "https://app.example".to_string(),
             allowed_email_domains: vec!["example.com".to_string()],
         };

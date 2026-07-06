@@ -357,6 +357,7 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
         operator_secret: SecretString::from("operator-secret".to_string()),
         base_url: "https://gateway.example".to_string(),
         providers: vec![QueueProvider::new(profiles) as Arc<dyn OAuthProvider>],
+        yunohost_portal: None,
         env_authenticator,
     })
     .expect("login wiring");
