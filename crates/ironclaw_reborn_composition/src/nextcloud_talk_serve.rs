@@ -121,6 +121,8 @@ pub fn build_nextcloud_talk_route_mount(
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
 
+    let workflow_binding = binding.clone();
+
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding,
         runtime.webui_thread_service(),
@@ -129,7 +131,7 @@ pub fn build_nextcloud_talk_route_mount(
     let workflow: Arc<dyn ProductWorkflow> = Arc::new(DefaultProductWorkflow::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::default()),
-        Arc::new(binding.clone()),
+        Arc::new(workflow_binding),
     ));
 
     let mention_regex = config
