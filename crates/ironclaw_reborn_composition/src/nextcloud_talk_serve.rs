@@ -129,7 +129,7 @@ pub fn build_nextcloud_talk_route_mount(
     let workflow: Arc<dyn ProductWorkflow> = Arc::new(DefaultProductWorkflow::new(
         inbound,
         Arc::new(InMemoryIdempotencyLedger::default()),
-        Arc::new(NoopConversationBindingService),
+        Arc::new(binding.clone()),
     ));
 
     let mention_regex = config
@@ -528,29 +528,6 @@ fn strip_mention(text: &str, bot_name: &str) -> String {
     cleaned = cleaned.replace(&format!("@{}", bot_name.to_ascii_lowercase()), "");
     cleaned = cleaned.replace(bot_name, "");
     cleaned.trim().to_string()
-}
-
-struct NoopConversationBindingService;
-
-#[async_trait]
-impl ironclaw_product_workflow::ConversationBindingService for NoopConversationBindingService {
-    async fn resolve_binding(
-        &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
-            reason: "nextcloud talk route does not expose conversation binding lookup".to_string(),
-        })
-    }
-
-    async fn lookup_binding(
-        &self,
-        _request: ironclaw_product_workflow::ResolveBindingRequest,
-    ) -> Result<ironclaw_product_workflow::ResolvedBinding, ProductWorkflowError> {
-        Err(ProductWorkflowError::BindingResolutionFailed {
-            reason: "nextcloud talk route does not expose conversation binding lookup".to_string(),
-        })
-    }
 }
 
 struct StaticNextcloudActorResolver {
