@@ -9,8 +9,7 @@
     "display_name": "Nextcloud Talk",
     "instructions": "Create a Talk bot in Nextcloud with webhook + response feature. Use your Nextcloud base URL and the bot secret from OCC.",
     "setup_url": "https://nextcloud.com/talk/",
-    "token_hint": "https://cloud.example.tld and a long bot secret",
-    "env_var": "NEXTCLOUD_TALK_BASE_URL"
+    "token_hint": "Configure base URL + bot secret in the IronClaw extension setup UI"
   },
   "setup": {
     "required_secrets": [
@@ -50,11 +49,7 @@
     "http": {
       "allowlist": [
         {
-          "host": "cloud.kiga-gramschatz.de",
-          "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/"
-        },
-        {
-          "host": "10.12.12.101",
+          "host": "next.cloud.kiga-gramschatz.de",
           "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/"
         }
       ],
@@ -70,7 +65,7 @@
     },
     "channel": {
       "allowed_paths": [
-        "/webhook/nextcloud-talk"
+      "/webhooks/nextcloud/talk"
       ],
       "allow_polling": false,
       "workspace_prefix": "channels/nextcloud-talk/",

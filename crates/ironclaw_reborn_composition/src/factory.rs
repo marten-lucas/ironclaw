@@ -382,23 +382,20 @@ pub struct RebornServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
-    /// Shared scoped secret store. Exposed so runtime-level features (e.g.
-    /// operator LLM-key storage) can reuse the same instance product-auth uses
-    /// rather than standing up a second authority.
-    #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
+    /// Shared scoped secret store. Exposed so runtime-level features can
+    /// resolve credential material without introducing parallel secret paths.
     pub(crate) secret_store: Arc<dyn SecretStore>,
 }
 
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
 
     /// Test-support access to the shared scoped secret store backing the
     /// composed runtime.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn secret_store_for_test(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
@@ -1150,7 +1147,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         local_runtime: Some(store_graph.local_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: None,
-        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
     })
 }
@@ -3366,7 +3362,6 @@ where
         local_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: Some(production_runtime),
-        #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
         secret_store,
     })
 }

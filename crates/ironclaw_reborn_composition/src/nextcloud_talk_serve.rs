@@ -12,8 +12,15 @@ use axum::{
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
+use ironclaw_auth::{
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
+    CredentialAccountSelectionRequest,
+};
 use ironclaw_conversations::InMemoryConversationServices;
-use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope,
+    RuntimeCredentialAccountSetup, TenantId, UserId,
+};
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
@@ -37,13 +44,17 @@ use ironclaw_product_workflow::{
     StaticProductInstallationResolver,
 };
 use regex::Regex;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use ironclaw_secrets::{SecretStore, SecretStoreError};
 
 use crate::RebornRuntime;
+use crate::product_auth_runtime_credentials::{
+    RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
+};
 use crate::webui_serve::PublicRouteMount;
 
 const NEXTCLOUD_SIGNATURE_HEADER: &str = "X-Nextcloud-Talk-Signature";
@@ -65,13 +76,14 @@ pub struct NextcloudTalkRouteConfig {
     pub webhook_path: String,
     pub bot_name: String,
     pub mention_regex: Option<String>,
-    pub shared_secret: SecretString,
 }
 
 #[derive(Debug, Error)]
 pub enum NextcloudTalkBuildError {
     #[error("nextcloud talk route requires local runtime services")]
     DurableHostStateUnavailable,
+    #[error("nextcloud talk route requires product auth services")]
+    ProductAuthUnavailable,
     #[error("invalid nextcloud configuration ({field}): {reason}")]
     InvalidConfig { field: &'static str, reason: String },
 }
@@ -85,6 +97,14 @@ pub fn build_nextcloud_talk_route_mount(
         .local_runtime
         .as_ref()
         .ok_or(NextcloudTalkBuildError::DurableHostStateUnavailable)?;
+    let product_auth = runtime
+        .services()
+        .product_auth
+        .as_ref()
+        .ok_or(NextcloudTalkBuildError::ProductAuthUnavailable)?
+        .clone();
+    let runtime_credential_accounts = product_auth.runtime_credential_account_selection_service();
+    let secret_store = runtime.services().secret_store();
 
     let adapter_id = ProductAdapterId::new(&format!("{}/inbound", config.extension_id)).map_err(
         |err| NextcloudTalkBuildError::InvalidConfig {
@@ -96,6 +116,12 @@ pub fn build_nextcloud_talk_route_mount(
         NextcloudTalkBuildError::InvalidConfig {
             field: "extension_id",
             reason: format!("invalid installation id from extension id: {err}"),
+        }
+    })?;
+    let requester_extension = ExtensionId::new(config.extension_id.clone()).map_err(|err| {
+        NextcloudTalkBuildError::InvalidConfig {
+            field: "extension_id",
+            reason: format!("invalid requester extension id: {err}"),
         }
     })?;
 
@@ -152,7 +178,13 @@ pub fn build_nextcloud_talk_route_mount(
         webhook_path: config.webhook_path.clone(),
         bot_name: config.bot_name,
         mention_regex,
-        shared_secret: config.shared_secret,
+        runtime_credential_accounts,
+        secret_store,
+        requester_extension,
+        tenant_id: config.tenant_id,
+        agent_id: config.agent_id,
+        project_id: config.project_id,
+        user_id: config.user_id,
     };
 
     let descriptor = IngressRouteDescriptor::new(
@@ -182,7 +214,18 @@ struct NextcloudTalkRouteState {
     webhook_path: String,
     bot_name: String,
     mention_regex: Option<Regex>,
-    shared_secret: SecretString,
+    runtime_credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    secret_store: Arc<dyn SecretStore>,
+    requester_extension: ExtensionId,
+    tenant_id: TenantId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    user_id: UserId,
+}
+
+enum NextcloudSecretResolutionError {
+    Missing,
+    Backend,
 }
 
 fn nextcloud_talk_policy() -> IngressPolicy {
@@ -262,6 +305,28 @@ async fn nextcloud_talk_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let shared_secret = match resolve_nextcloud_bot_secret(&state).await {
+        Ok(secret) => secret,
+        Err(NextcloudSecretResolutionError::Missing) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(NextcloudErrorBody {
+                    error: "missing_signature_secret",
+                }),
+            )
+                .into_response();
+        }
+        Err(NextcloudSecretResolutionError::Backend) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(NextcloudErrorBody {
+                    error: "secret_backend_unavailable",
+                }),
+            )
+                .into_response();
+        }
+    };
+
     let Some(signature) = headers
         .get(NEXTCLOUD_SIGNATURE_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -289,7 +354,7 @@ async fn nextcloud_talk_handler(
     };
 
     if !verify_nextcloud_signature(
-        state.shared_secret.expose_secret(),
+        &shared_secret,
         random,
         body.as_ref(),
         signature,
@@ -382,6 +447,69 @@ async fn nextcloud_talk_handler(
             )
                 .into_response()
         }
+    }
+}
+
+async fn resolve_nextcloud_bot_secret(
+    state: &NextcloudTalkRouteState,
+) -> Result<String, NextcloudSecretResolutionError> {
+    let provider = AuthProviderId::new("nextcloud_talk_bot_secret")
+        .map_err(|_| NextcloudSecretResolutionError::Backend)?;
+    let scope = AuthProductScope::new(
+        ResourceScope {
+            tenant_id: state.tenant_id.clone(),
+            user_id: state.user_id.clone(),
+            agent_id: Some(state.agent_id.clone()),
+            project_id: state.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        },
+        AuthSurface::Api,
+    );
+    let selection_request = RuntimeCredentialAccountSelectionRequest::new(
+        CredentialAccountSelectionRequest::new(scope.clone(), provider)
+            .for_extension(state.requester_extension.clone()),
+        scope,
+        RuntimeCredentialAccountSetup::ManualToken,
+        Vec::new(),
+    );
+    let account = state
+        .runtime_credential_accounts
+        .select_unique_configured_runtime_account(selection_request)
+        .await
+        .map_err(|error| match error {
+            AuthProductError::CredentialMissing
+            | AuthProductError::CrossScopeDenied
+            | AuthProductError::AccountSelectionRequired => NextcloudSecretResolutionError::Missing,
+            _ => NextcloudSecretResolutionError::Backend,
+        })?;
+    let handle = account
+        .access_secret
+        .ok_or(NextcloudSecretResolutionError::Missing)?;
+    let lease = state
+        .secret_store
+        .lease_once(&account.scope.resource, &handle)
+        .await
+        .map_err(map_secret_store_error)?;
+    let material = state
+        .secret_store
+        .consume(&account.scope.resource, lease.id)
+        .await
+        .map_err(map_secret_store_error)?;
+    Ok(material.expose_secret().to_string())
+}
+
+fn map_secret_store_error(error: SecretStoreError) -> NextcloudSecretResolutionError {
+    match error {
+        SecretStoreError::UnknownSecret { .. }
+        | SecretStoreError::UnknownLease { .. }
+        | SecretStoreError::LeaseConsumed { .. }
+        | SecretStoreError::LeaseRevoked { .. }
+        | SecretStoreError::LeaseExpired { .. }
+        | SecretStoreError::SecretExpired => NextcloudSecretResolutionError::Missing,
+        SecretStoreError::BackendMisconfigured { .. }
+        | SecretStoreError::StoreUnavailable { .. } => NextcloudSecretResolutionError::Backend,
     }
 }
 

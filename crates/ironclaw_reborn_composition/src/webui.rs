@@ -288,15 +288,7 @@ fn boot_config_extension_runtime_status_service(
 
     if let Some(nextcloud) = config.as_ref().and_then(|cfg| cfg.nextcloud_talk.as_ref()) {
         let status = if nextcloud.enabled == Some(true) {
-            if env::var("IRONCLAW_REBORN_NEXTCLOUD_TALK_BOT_SECRET")
-                .ok()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
-                "mounted"
-            } else {
-                "missing_secret"
-            }
+            "mounted"
         } else {
             "disabled"
         };
