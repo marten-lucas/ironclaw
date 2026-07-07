@@ -11,6 +11,7 @@ use axum::{
     routing::post,
 };
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, UserId};
 use ironclaw_host_api::ingress::{
@@ -38,6 +39,8 @@ use ironclaw_product_workflow::{
 use regex::Regex;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 use crate::RebornRuntime;
@@ -49,6 +52,8 @@ const NEXTCLOUD_ROUTE_ID: &str = "nextcloud_talk.events";
 const NEXTCLOUD_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(512 * 1024).unwrap();
 const NEXTCLOUD_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(6_000).unwrap();
 const NEXTCLOUD_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap();
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
 pub struct NextcloudTalkRouteConfig {
@@ -268,7 +273,25 @@ async fn nextcloud_talk_handler(
             .into_response();
     };
 
-    if signature != state.shared_secret.expose_secret() {
+    let Some(random) = headers
+        .get(NEXTCLOUD_RANDOM_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(NextcloudErrorBody {
+                error: "missing_signature",
+            }),
+        )
+            .into_response();
+    };
+
+    if !verify_nextcloud_signature(
+        state.shared_secret.expose_secret(),
+        random,
+        body.as_ref(),
+        signature,
+    ) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(NextcloudErrorBody {
@@ -358,6 +381,37 @@ async fn nextcloud_talk_handler(
                 .into_response()
         }
     }
+}
+
+fn verify_nextcloud_signature(secret: &str, random: &str, body: &[u8], signature: &str) -> bool {
+    let Some(provided) = normalize_nextcloud_signature(signature) else {
+        return false;
+    };
+
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    mac.update(random.trim().as_bytes());
+    mac.update(body);
+    let expected = format!("{:x}", mac.finalize().into_bytes());
+
+    if expected.len() != provided.len() {
+        return false;
+    }
+
+    bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+}
+
+fn normalize_nextcloud_signature(signature: &str) -> Option<String> {
+    let mut normalized = signature.trim().trim_matches('"').to_ascii_lowercase();
+    if let Some(rest) = normalized.strip_prefix("sha256=") {
+        normalized = rest.to_string();
+    }
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(normalized)
 }
 
 fn parse_talk_event(
@@ -516,5 +570,47 @@ impl ProductActorUserResolver for StaticNextcloudActorResolver {
         _request: ProductActorUserResolutionRequest,
     ) -> Result<Option<UserId>, ProductWorkflowError> {
         Ok(Some(self.user_id.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sign(secret: &str, random: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac init");
+        mac.update(random.as_bytes());
+        mac.update(body);
+        format!("{:x}", mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn verifies_valid_signature() {
+        let secret = "bot-secret";
+        let random = "nextcloud-random-abc123";
+        let body = br#"{"type":"Create","object":{"content":"hello"}}"#;
+        let signature = sign(secret, random, body);
+
+        assert!(verify_nextcloud_signature(secret, random, body, &signature));
+    }
+
+    #[test]
+    fn accepts_sha256_prefixed_and_quoted_signature() {
+        let secret = "bot-secret";
+        let random = "nextcloud-random-abc123";
+        let body = br#"{"type":"Create","object":{"content":"hello"}}"#;
+        let signature = sign(secret, random, body);
+        let prefixed = format!("\"sha256={}\"", signature.to_uppercase());
+
+        assert!(verify_nextcloud_signature(secret, random, body, &prefixed));
+    }
+
+    #[test]
+    fn rejects_non_hex_signature() {
+        let secret = "bot-secret";
+        let random = "nextcloud-random-abc123";
+        let body = br#"{"type":"Create","object":{"content":"hello"}}"#;
+
+        assert!(!verify_nextcloud_signature(secret, random, body, "not-a-valid-signature"));
     }
 }

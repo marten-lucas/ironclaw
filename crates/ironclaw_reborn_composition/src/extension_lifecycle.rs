@@ -4243,6 +4243,7 @@ output_schema_ref = "schemas/search.output.json"
             manifest_toml: manifest_toml.to_string(),
             package,
             surface_kinds: Vec::new(),
+            product_adapter_required_credentials: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),
