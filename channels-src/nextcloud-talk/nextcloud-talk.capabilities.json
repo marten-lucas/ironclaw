@@ -65,7 +65,7 @@
     },
     "channel": {
       "allowed_paths": [
-      "/webhooks/nextcloud/talk"
+        "/webhooks/nextcloud/talk"
       ],
       "allow_polling": false,
       "workspace_prefix": "channels/nextcloud-talk/",
