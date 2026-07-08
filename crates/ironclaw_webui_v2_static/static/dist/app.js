@@ -5091,6 +5091,11 @@ ${De}`;if(X.current.gateKey!==Oe&&(X.current={gateKey:Oe,credentialRef:null,inFl
                 className="mb-1.5 flex items-center gap-2 text-sm text-iron-200"
               >
                 ${_.prompt||_.name}
+                ${_.provided&&l`
+                  <span className="font-mono text-[10px] text-mint"
+                    >${r("common.configured")||"configured"}</span
+                  >
+                `}
                 ${_.optional&&l`
                   <span className="font-mono text-[10px] text-iron-700"
                     >${r("common.optional")||"optional"}</span
@@ -5099,7 +5104,7 @@ ${De}`;if(X.current.gateKey!==Oe&&(X.current={gateKey:Oe,credentialRef:null,inFl
               </label>
               <input
                 type="text"
-                placeholder=${_.placeholder||""}
+                placeholder=${_.provided?"\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (leave blank to keep)":_.placeholder||""}
                 value=${p[_.name]||""}
                 onChange=${E=>b(O=>({...O,[_.name]:E.target.value}))}
                 onKeyDown=${E=>E.key==="Enter"&&g()}
