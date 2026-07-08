@@ -262,19 +262,33 @@ fn setup_projection(
 }
 
 fn credential_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String {
-    if requirement.provider == "nextcloud_talk_bot_secret" {
-        return "Nextcloud Talk bot secret from occ talk:bot:install".to_string();
+    if requirement.provider == "nextcloud_talk_app_password" {
+        return "Nextcloud app password for fake-user".to_string();
+    }
+    if requirement.provider == "nextcloud_talk_webhook_secret" {
+        return "Optional webhook signature secret (X-Nextcloud-Talk-Signature)".to_string();
     }
     format!("{} credential", requirement.provider)
 }
 
 fn is_open_setup_field(requirement: &LifecycleExtensionCredentialRequirement) -> bool {
-    requirement.provider == "nextcloud_talk_base_url"
+    matches!(
+        requirement.provider.as_str(),
+        "nextcloud_talk_base_url"
+            | "nextcloud_talk_bot_username"
+            | "nextcloud_talk_bot_display_name"
+    )
 }
 
 fn field_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String {
     if requirement.provider == "nextcloud_talk_base_url" {
         return "Nextcloud base URL (example: https://cloud.example.tld)".to_string();
+    }
+    if requirement.provider == "nextcloud_talk_bot_username" {
+        return "Nextcloud fake-user username".to_string();
+    }
+    if requirement.provider == "nextcloud_talk_bot_display_name" {
+        return "Bot display name used for exact mentions (default: ironclaw)".to_string();
     }
     requirement.name.clone()
 }
@@ -282,6 +296,9 @@ fn field_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String
 fn field_placeholder(requirement: &LifecycleExtensionCredentialRequirement) -> Option<String> {
     if requirement.provider == "nextcloud_talk_base_url" {
         return Some("https://cloud.example.tld".to_string());
+    }
+    if requirement.provider == "nextcloud_talk_bot_display_name" {
+        return Some("ironclaw".to_string());
     }
     None
 }

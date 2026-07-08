@@ -341,9 +341,9 @@ pub struct SlackChannelRouteSection {
 
 /// Nextcloud Talk direct-channel host configuration.
 ///
-/// `enabled = true` is required before the standalone Reborn listener mounts
-/// a Nextcloud Talk webhook route. Secret material stays in product-auth
-/// credentials (`nextcloud_talk_bot_secret`) and is not stored here.
+/// Deprecated: Nextcloud Talk routing is now mounted from extension metadata
+/// and credentials configured via setup UI. This section remains parseable for
+/// backward compatibility but is ignored by the serve command.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NextcloudTalkSection {

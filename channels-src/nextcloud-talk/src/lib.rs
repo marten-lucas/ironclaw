@@ -90,7 +90,7 @@ impl Guest for NextcloudTalkAdapter {
             capabilities_json,
             declared_egress_targets: vec![DeclaredEgressTarget {
                 host: "nextcloud.local".to_string(),
-                credential_handle: Some("nextcloud_talk_bot_secret".to_string()),
+                credential_handle: Some("nextcloud_talk_app_password".to_string()),
             }],
             declared_auth_requirements: vec![AuthRequirement {
                 kind: AuthRequirementKind::RequestSignature,
@@ -127,7 +127,7 @@ impl Guest for NextcloudTalkAdapter {
                 return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
             }
 
-            if !is_mention_for_bot(&rendered, DEFAULT_BOT_NAME) {
+            if !is_exact_mention_for_bot(&rendered, DEFAULT_BOT_NAME) {
                 return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
             }
 
@@ -184,17 +184,14 @@ impl Guest for NextcloudTalkAdapter {
         let reply_to = conversation
             .get("reply_target_message_id")
             .and_then(|v| v.as_str())
-            .and_then(|v| v.parse::<u64>().ok());
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
 
-        let body_value = if let Some(reply_to) = reply_to {
-            serde_json::json!({ "message": text, "replyTo": reply_to })
-        } else {
-            serde_json::json!({ "message": text })
-        };
+        let body_value = serde_json::json!({ "message": text, "replyTo": reply_to });
         let body = serde_json::to_vec(&body_value)
             .map_err(|err| format!("nextcloud-talk: failed to encode outbound body: {err}"))?;
 
-        let path = format!("/ocs/v2.php/apps/spreed/api/v1/bot/{room_token}/message");
+        let path = format!("/ocs/v2.php/apps/spreed/api/v1/chat/{room_token}");
         let request = serde_json::json!({
             "egress_target_index": 0,
             "method": "POST",
@@ -392,17 +389,26 @@ fn render_parameters(message: &str, parameters: HashMap<String, TalkParameter>) 
     rendered
 }
 
-fn is_mention_for_bot(text: &str, bot_name: &str) -> bool {
-    let lower_text = text.to_ascii_lowercase();
-    let lower_bot = bot_name.to_ascii_lowercase();
-    lower_text.contains(&format!("@{}", lower_bot)) || lower_text.contains(&lower_bot)
+fn mention_token(bot_name: &str) -> Option<String> {
+    let trimmed = bot_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("@{trimmed}"))
+}
+
+fn is_exact_mention_for_bot(text: &str, bot_name: &str) -> bool {
+    let Some(token) = mention_token(bot_name) else {
+        return false;
+    };
+    text.contains(&token)
 }
 
 fn strip_mention(text: &str, bot_name: &str) -> String {
-    let mut cleaned = text.replace(&format!("@{}", bot_name), "");
-    cleaned = cleaned.replace(&format!("@{}", bot_name.to_ascii_lowercase()), "");
-    cleaned = cleaned.replace(bot_name, "");
-    cleaned.trim().to_string()
+    let Some(token) = mention_token(bot_name) else {
+        return text.trim().to_string();
+    };
+    text.replace(&token, "").trim().to_string()
 }
 
 export!(NextcloudTalkAdapter);
@@ -420,5 +426,11 @@ mod tests {
     #[test]
     fn strips_mentions() {
         assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
+    }
+
+    #[test]
+    fn exact_mention_does_not_match_plain_name() {
+        assert!(!is_exact_mention_for_bot("ironclaw please help", "ironclaw"));
+        assert!(is_exact_mention_for_bot("@ironclaw please help", "ironclaw"));
     }
 }

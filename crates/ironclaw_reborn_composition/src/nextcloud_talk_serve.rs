@@ -43,7 +43,6 @@ use ironclaw_product_workflow::{
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     StaticProductInstallationResolver,
 };
-use regex::Regex;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -75,7 +74,6 @@ pub struct NextcloudTalkRouteConfig {
     pub extension_id: String,
     pub webhook_path: String,
     pub bot_name: String,
-    pub mention_regex: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -160,24 +158,12 @@ pub fn build_nextcloud_talk_route_mount(
         Arc::new(workflow_binding),
     ));
 
-    let mention_regex = config
-        .mention_regex
-        .as_ref()
-        .map(|value| {
-            Regex::new(value).map_err(|err| NextcloudTalkBuildError::InvalidConfig {
-                field: "mention_regex",
-                reason: err.to_string(),
-            })
-        })
-        .transpose()?;
-
     let state = NextcloudTalkRouteState {
         adapter_id,
         installation_id,
         workflow,
         webhook_path: config.webhook_path.clone(),
         bot_name: config.bot_name,
-        mention_regex,
         runtime_credential_accounts,
         secret_store,
         requester_extension,
@@ -213,7 +199,6 @@ struct NextcloudTalkRouteState {
     workflow: Arc<dyn ProductWorkflow>,
     webhook_path: String,
     bot_name: String,
-    mention_regex: Option<Regex>,
     runtime_credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
     secret_store: Arc<dyn SecretStore>,
     requester_extension: ExtensionId,
@@ -305,7 +290,7 @@ async fn nextcloud_talk_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let shared_secret = match resolve_nextcloud_bot_secret(&state).await {
+    let shared_secret = match resolve_nextcloud_webhook_secret(&state).await {
         Ok(secret) => secret,
         Err(NextcloudSecretResolutionError::Missing) => {
             return (
@@ -381,7 +366,7 @@ async fn nextcloud_talk_handler(
         }
     };
 
-    let parsed = match parse_talk_event(&event, &state.bot_name, state.mention_regex.as_ref()) {
+    let parsed = match parse_talk_event(&event, &state.bot_name) {
         Ok(Some(value)) => value,
         Ok(None) => return (StatusCode::OK, "ok").into_response(),
         Err(_) => {
@@ -450,10 +435,10 @@ async fn nextcloud_talk_handler(
     }
 }
 
-async fn resolve_nextcloud_bot_secret(
+async fn resolve_nextcloud_webhook_secret(
     state: &NextcloudTalkRouteState,
 ) -> Result<String, NextcloudSecretResolutionError> {
-    let provider = AuthProviderId::new("nextcloud_talk_bot_secret")
+    let provider = AuthProviderId::new("nextcloud_talk_webhook_secret")
         .map_err(|_| NextcloudSecretResolutionError::Backend)?;
     let scope = AuthProductScope::new(
         ResourceScope {
@@ -547,7 +532,6 @@ fn normalize_nextcloud_signature(signature: &str) -> Option<String> {
 fn parse_talk_event(
     event: &TalkEvent,
     bot_name: &str,
-    mention_regex: Option<&Regex>,
 ) -> Result<Option<ParsedProductInbound>, ProductWorkflowError> {
     if event.event_type != "Create" || is_bot_authored(event) {
         return Ok(None);
@@ -574,9 +558,7 @@ fn parse_talk_event(
         return Ok(None);
     }
 
-    let is_mention = mention_regex
-        .map(|re| re.is_match(&rendered))
-        .unwrap_or_else(|| is_mention_for_bot(&rendered, bot_name));
+    let is_mention = is_exact_mention_for_bot(&rendered, bot_name);
     if !is_mention {
         return Ok(None);
     }
@@ -647,17 +629,26 @@ fn parse_message_content(content: &str) -> String {
     content.to_string()
 }
 
-fn is_mention_for_bot(text: &str, bot_name: &str) -> bool {
-    let lower_text = text.to_ascii_lowercase();
-    let lower_bot = bot_name.to_ascii_lowercase();
-    lower_text.contains(&format!("@{lower_bot}")) || lower_text.contains(&lower_bot)
+fn mention_token(bot_name: &str) -> Option<String> {
+    let trimmed = bot_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!("@{trimmed}"))
+}
+
+fn is_exact_mention_for_bot(text: &str, bot_name: &str) -> bool {
+    let Some(token) = mention_token(bot_name) else {
+        return false;
+    };
+    text.contains(&token)
 }
 
 fn strip_mention(text: &str, bot_name: &str) -> String {
-    let mut cleaned = text.replace(&format!("@{bot_name}"), "");
-    cleaned = cleaned.replace(&format!("@{}", bot_name.to_ascii_lowercase()), "");
-    cleaned = cleaned.replace(bot_name, "");
-    cleaned.trim().to_string()
+    let Some(token) = mention_token(bot_name) else {
+        return text.trim().to_string();
+    };
+    text.replace(&token, "").trim().to_string()
 }
 
 struct StaticNextcloudActorResolver {
@@ -719,5 +710,17 @@ mod tests {
         let body = br#"{"type":"Create","object":{"content":"hello"}}"#;
 
         assert!(!verify_nextcloud_signature(secret, random, body, "not-a-valid-signature"));
+    }
+
+    #[test]
+    fn exact_mention_requires_at_prefix() {
+        assert!(!is_exact_mention_for_bot("ironclaw please help", "ironclaw"));
+        assert!(is_exact_mention_for_bot("@ironclaw please help", "ironclaw"));
+    }
+
+    #[test]
+    fn strip_mention_only_removes_explicit_token() {
+        assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
+        assert_eq!(strip_mention("ironclaw hello", "ironclaw"), "ironclaw hello");
     }
 }

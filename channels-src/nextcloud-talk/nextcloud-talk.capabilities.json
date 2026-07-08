@@ -3,13 +3,13 @@
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "nextcloud-talk",
-  "description": "Nextcloud Talk bot webhook channel for receiving mentions and sending responses",
+  "description": "Nextcloud Talk webhook channel using fake-user credentials configured in the extension UI",
   "auth": {
     "secret_name": "nextcloud_talk_base_url",
     "display_name": "Nextcloud Talk",
-    "instructions": "Create a Talk bot in Nextcloud with webhook + response feature. Use your Nextcloud base URL and the bot secret from OCC.",
+    "instructions": "Configure Nextcloud base URL, fake-user username, app password, and optional webhook signature secret in the IronClaw extension setup UI.",
     "setup_url": "https://nextcloud.com/talk/",
-    "token_hint": "Configure base URL + bot secret in the IronClaw extension setup UI"
+    "token_hint": "Configure all Nextcloud channel credentials in the IronClaw extension setup UI"
   },
   "setup": {
     "required_secrets": [
@@ -19,13 +19,23 @@
         "optional": false
       },
       {
-        "name": "nextcloud_talk_bot_secret",
-        "prompt": "Nextcloud Talk bot secret from 'occ talk:bot:install'",
+        "name": "nextcloud_talk_bot_username",
+        "prompt": "Nextcloud fake-user username",
         "optional": false
       },
       {
-        "name": "nextcloud_talk_backend_allowlist",
-        "prompt": "Optional comma-separated backend hosts allowed in X-Nextcloud-Talk-Backend",
+        "name": "nextcloud_talk_app_password",
+        "prompt": "Nextcloud app password for fake-user",
+        "optional": false
+      },
+      {
+        "name": "nextcloud_talk_webhook_secret",
+        "prompt": "Optional webhook signature secret for X-Nextcloud-Talk-Signature verification",
+        "optional": true
+      },
+      {
+        "name": "nextcloud_talk_bot_display_name",
+        "prompt": "Optional display name used for mention matching (default: ironclaw)",
         "optional": true
       }
     ],
@@ -35,12 +45,20 @@
         "secret_name": "nextcloud_talk_base_url"
       },
       {
-        "config_key": "bot_secret",
-        "secret_name": "nextcloud_talk_bot_secret"
+        "config_key": "bot_username",
+        "secret_name": "nextcloud_talk_bot_username"
       },
       {
-        "config_key": "backend_allowlist_raw",
-        "secret_name": "nextcloud_talk_backend_allowlist"
+        "config_key": "app_password",
+        "secret_name": "nextcloud_talk_app_password"
+      },
+      {
+        "config_key": "webhook_secret",
+        "secret_name": "nextcloud_talk_webhook_secret"
+      },
+      {
+        "config_key": "bot_display_name",
+        "secret_name": "nextcloud_talk_bot_display_name"
       }
     ],
     "setup_url": "https://nextcloud.com/talk/"
@@ -50,7 +68,7 @@
       "allowlist": [
         {
           "host": "next.cloud.kiga-gramschatz.de",
-          "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/bot/"
+          "path_prefix": "/ocs/v2.php/apps/spreed/api/v1/chat/"
         }
       ],
       "rate_limit": {
@@ -75,16 +93,18 @@
       },
       "webhook": {
         "secret_header": "X-Nextcloud-Talk-Signature",
-        "secret_name": "nextcloud_talk_bot_secret",
+        "secret_name": "nextcloud_talk_webhook_secret",
         "managed_by_host": false
       }
     }
   },
   "config": {
     "base_url": null,
-    "bot_secret": null,
-    "backend_allowlist_raw": null,
+    "bot_username": null,
+    "app_password": null,
+    "webhook_secret": null,
     "bot_display_name": "ironclaw",
-    "require_mention": true
+    "require_mention": true,
+    "mention_mode": "exact"
   }
 }
