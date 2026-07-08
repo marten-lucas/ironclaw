@@ -57,6 +57,7 @@ pub(super) async fn project(
                 name: requirement.name.clone(),
                 prompt: field_prompt(requirement),
                 optional: !requirement.required,
+                provided: account.is_some(),
                 placeholder: field_placeholder(requirement),
             });
             continue;

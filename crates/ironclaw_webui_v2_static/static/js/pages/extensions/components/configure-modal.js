@@ -180,6 +180,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                 className="mb-1.5 flex items-center gap-2 text-sm text-iron-200"
               >
                 ${field.prompt || field.name}
+                ${field.provided &&
+                html`
+                  <span className="font-mono text-[10px] text-mint"
+                    >${t("common.configured") || "configured"}</span
+                  >
+                `}
                 ${field.optional &&
                 html`
                   <span className="font-mono text-[10px] text-iron-700"
@@ -189,7 +195,9 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
               </label>
               <input
                 type="text"
-                placeholder=${field.placeholder || ""}
+                placeholder=${field.provided
+                  ? "••••••• (leave blank to keep)"
+                  : field.placeholder || ""}
                 value=${fieldValues[field.name] || ""}
                 onChange=${(e) =>
                   setFieldValues((prev) => ({

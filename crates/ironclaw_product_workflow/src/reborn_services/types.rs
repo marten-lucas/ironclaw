@@ -1207,6 +1207,8 @@ pub struct RebornExtensionSetupField {
     pub name: String,
     pub prompt: String,
     pub optional: bool,
+    #[serde(default)]
+    pub provided: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
 }
