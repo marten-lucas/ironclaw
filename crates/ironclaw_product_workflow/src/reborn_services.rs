@@ -479,6 +479,13 @@ pub struct ExtensionCredentialSubmitRequest {
     pub secret: SecretString,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExtensionCredentialStoredValueRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub requester_extension: ExtensionId,
+}
+
 #[async_trait]
 pub trait ExtensionCredentialSetupService: Send + Sync {
     async fn credential_status(
@@ -490,6 +497,13 @@ pub trait ExtensionCredentialSetupService: Send + Sync {
         &self,
         request: ExtensionCredentialSubmitRequest,
     ) -> Result<CredentialAccountId, RebornServicesError>;
+
+    async fn resolve_stored_manual_token_value(
+        &self,
+        _request: ExtensionCredentialStoredValueRequest,
+    ) -> Result<Option<SecretString>, RebornServicesError> {
+        Ok(None)
+    }
 }
 
 /// Product caller scope for actions that must run against a concrete agent.
@@ -3023,7 +3037,13 @@ impl RebornServicesApi for RebornServices {
         package_ref: LifecyclePackageRef,
         request: WebUiTestExtensionConnectionRequest,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        lifecycle_setup::test_extension_connection(caller, package_ref, request).await
+        lifecycle_setup::test_extension_connection(
+            self.extension_credentials.as_deref(),
+            caller,
+            package_ref,
+            request,
+        )
+        .await
     }
 
     async fn get_operator_status(

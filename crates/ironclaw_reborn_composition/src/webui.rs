@@ -175,9 +175,12 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         ))));
     }
     if let Some(product_auth) = &services.product_auth {
-        api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
-            Arc::clone(product_auth),
-        )));
+        api = api.with_extension_credentials(Arc::new(
+            ProductAuthExtensionCredentialSetup::new_with_secret_store(
+                Arc::clone(product_auth),
+                Arc::clone(&services.secret_store),
+            ),
+        ));
     }
     // Local-dev and production graphs both carry a trigger repository; whichever
     // is wired backs the automations panel.

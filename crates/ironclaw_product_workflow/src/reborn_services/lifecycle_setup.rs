@@ -1,6 +1,7 @@
-use ironclaw_auth::AuthProductScope;
+use ironclaw_auth::{AuthProductScope, AuthProviderId};
 use ironclaw_host_api::ExtensionId;
 use reqwest::header::CONTENT_TYPE;
+use secrecy::ExposeSecret;
 use std::time::Duration;
 use url::Url;
 
@@ -14,7 +15,8 @@ use crate::{
 };
 
 use super::{
-    ExtensionCredentialSetupService, extension_credentials::credential_scope, extension_onboarding,
+    ExtensionCredentialSetupService, ExtensionCredentialStoredValueRequest,
+    extension_credentials::credential_scope, extension_onboarding,
     extension_setup_credentials,
 };
 
@@ -74,7 +76,8 @@ pub(super) async fn setup_extension(
 }
 
 pub(super) async fn test_extension_connection(
-    _caller: WebUiAuthenticatedCaller,
+extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
     request: WebUiTestExtensionConnectionRequest,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
@@ -84,35 +87,63 @@ pub(super) async fn test_extension_connection(
         ));
     }
 
-    let base_url = match test_connection_value(&request, "nextcloud_talk_base_url") {
+    let extension_id =
+        ExtensionId::new(package_ref.id.as_str()).map_err(|_| RebornServicesError::internal_invariant())?;
+    let scope = credential_scope(&caller, &package_ref);
+
+    let base_url = match test_connection_value_with_fallback(
+        extension_credentials,
+        &request,
+        "nextcloud_talk_base_url",
+        scope.clone(),
+        &extension_id,
+    )
+    .await?
+    {
         Some(value) => value,
         None => {
             return Ok(connection_fail(
-                "Missing nextcloud_talk_base_url. Enter the URL in this dialog before testing."
+                "Missing nextcloud_talk_base_url. Enter and save the URL, or provide it in this dialog before testing."
                     .to_string(),
             ))
         }
     };
-    let bot_username = match test_connection_value(&request, "nextcloud_talk_bot_username") {
+    let bot_username = match test_connection_value_with_fallback(
+        extension_credentials,
+        &request,
+        "nextcloud_talk_bot_username",
+        scope.clone(),
+        &extension_id,
+    )
+    .await?
+    {
         Some(value) => value,
         None => {
             return Ok(connection_fail(
-                "Missing nextcloud_talk_bot_username. Enter the username in this dialog before testing."
+                "Missing nextcloud_talk_bot_username. Enter and save the username, or provide it in this dialog before testing."
                     .to_string(),
             ))
         }
     };
-    let app_password = match test_connection_value(&request, "nextcloud_talk_app_password") {
+    let app_password = match test_connection_value_with_fallback(
+        extension_credentials,
+        &request,
+        "nextcloud_talk_app_password",
+        scope,
+        &extension_id,
+    )
+    .await?
+    {
         Some(value) => value,
         None => {
             return Ok(connection_fail(
-                "Missing nextcloud_talk_app_password. 'Leave blank to keep' values are not reused by the connection test; re-enter app password to test."
+                "Missing nextcloud_talk_app_password. Save an app password first or enter it in this dialog before testing."
                     .to_string(),
             ))
         }
     };
 
-    let normalized_base_url = match normalize_test_base_url(base_url) {
+    let normalized_base_url = match normalize_test_base_url(&base_url) {
         Ok(value) => value,
         Err(message) => return Ok(connection_fail(message)),
     };
@@ -128,7 +159,7 @@ pub(super) async fn test_extension_connection(
 
     let response = match client
         .get(&url)
-        .basic_auth(bot_username, Some(app_password))
+        .basic_auth(&bot_username, Some(app_password))
         .header("OCS-APIRequest", "true")
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
@@ -162,6 +193,38 @@ pub(super) async fn test_extension_connection(
     Ok(connection_fail(describe_nextcloud_http_error(
         status, &body_text,
     )))
+}
+
+async fn test_connection_value_with_fallback(
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    request: &WebUiTestExtensionConnectionRequest,
+    key: &str,
+    scope: AuthProductScope,
+    extension_id: &ExtensionId,
+) -> Result<Option<String>, RebornServicesError> {
+    if let Some(value) = test_connection_value(request, key) {
+        return Ok(Some(value.to_string()));
+    }
+    let Some(service) = extension_credentials else {
+        return Ok(None);
+    };
+    let provider =
+        AuthProviderId::new(key).map_err(|_| RebornServicesError::internal_invariant())?;
+    let resolved = service
+        .resolve_stored_manual_token_value(ExtensionCredentialStoredValueRequest {
+            scope,
+            provider,
+            requester_extension: extension_id.clone(),
+        })
+        .await?;
+    Ok(resolved.and_then(|value| {
+        let trimmed = value.expose_secret().trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
 }
 
 fn connection_ok(message: String) -> RebornExtensionActionResponse {
@@ -424,5 +487,119 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         | ProductWorkflowError::DuplicateAction { .. }
         | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::UnknownInstallation => RebornServicesError::internal_invariant(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use async_trait::async_trait;
+    use ironclaw_auth::{AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId};
+    use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId, UserId};
+    use secrecy::SecretString;
+
+    use crate::{
+        ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+        ExtensionCredentialStoredValueRequest, ExtensionCredentialSubmitRequest,
+        WebUiTestExtensionConnectionRequest,
+    };
+
+    use super::test_connection_value_with_fallback;
+
+    struct StoredValueService {
+        value: Option<SecretString>,
+    }
+
+    #[async_trait]
+    impl ExtensionCredentialSetupService for StoredValueService {
+        async fn credential_status(
+            &self,
+            _request: ExtensionCredentialStatusRequest,
+        ) -> Result<Option<ironclaw_auth::CredentialAccountProjection>, crate::RebornServicesError>
+        {
+            Ok(None)
+        }
+
+        async fn submit_manual_token(
+            &self,
+            _request: ExtensionCredentialSubmitRequest,
+        ) -> Result<CredentialAccountId, crate::RebornServicesError> {
+            Err(crate::RebornServicesError::internal_invariant())
+        }
+
+        async fn resolve_stored_manual_token_value(
+            &self,
+            request: ExtensionCredentialStoredValueRequest,
+        ) -> Result<Option<SecretString>, crate::RebornServicesError> {
+            assert_eq!(
+                request.provider,
+                AuthProviderId::new("nextcloud_talk_base_url").expect("provider")
+            );
+            Ok(self.value.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_value_prefers_request_payload_over_stored_value() {
+        let mut request = WebUiTestExtensionConnectionRequest::default();
+        request.fields = BTreeMap::from([(
+            "nextcloud_talk_base_url".to_string(),
+            "https://cloud.request.example".to_string(),
+        )]);
+        let service = StoredValueService {
+            value: Some(SecretString::from("https://cloud.saved.example".to_string())),
+        };
+
+        let value = test_connection_value_with_fallback(
+            Some(&service),
+            &request,
+            "nextcloud_talk_base_url",
+            test_scope(),
+            &ExtensionId::new("nextcloud-talk").expect("extension"),
+        )
+        .await
+        .expect("value resolution");
+
+        assert_eq!(value.as_deref(), Some("https://cloud.request.example"));
+    }
+
+    #[tokio::test]
+    async fn test_connection_value_uses_stored_value_when_request_is_blank() {
+        let mut request = WebUiTestExtensionConnectionRequest::default();
+        request.fields = BTreeMap::from([(
+            "nextcloud_talk_base_url".to_string(),
+            "   ".to_string(),
+        )]);
+        let service = StoredValueService {
+            value: Some(SecretString::from(" https://cloud.saved.example ".to_string())),
+        };
+
+        let value = test_connection_value_with_fallback(
+            Some(&service),
+            &request,
+            "nextcloud_talk_base_url",
+            test_scope(),
+            &ExtensionId::new("nextcloud-talk").expect("extension"),
+        )
+        .await
+        .expect("value resolution");
+
+        assert_eq!(value.as_deref(), Some("https://cloud.saved.example"));
+    }
+
+    fn test_scope() -> AuthProductScope {
+        AuthProductScope::new(
+            ResourceScope {
+                tenant_id: TenantId::new("tenant-nextcloud").expect("tenant"),
+                user_id: UserId::new("user-nextcloud").expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Web,
+        )
     }
 }

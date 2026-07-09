@@ -4,13 +4,16 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthProductError, CredentialAccountLabel,
-    CredentialAccountSelectionRequest,
+    CredentialAccountSelectionRequest, CredentialAccountStatus,
 };
+use ironclaw_host_api::RuntimeCredentialAccountSetup;
 use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialStoredValueRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind,
 };
+use ironclaw_secrets::{SecretStore, SecretStoreError};
 
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornProductAuthServices,
@@ -22,11 +25,25 @@ const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;
 #[derive(Clone)]
 pub(crate) struct ProductAuthExtensionCredentialSetup {
     product_auth: Arc<RebornProductAuthServices>,
+    secret_store: Option<Arc<dyn SecretStore>>,
 }
 
 impl ProductAuthExtensionCredentialSetup {
     pub(crate) fn new(product_auth: Arc<RebornProductAuthServices>) -> Self {
-        Self { product_auth }
+        Self {
+            product_auth,
+            secret_store: None,
+        }
+    }
+
+    pub(crate) fn new_with_secret_store(
+        product_auth: Arc<RebornProductAuthServices>,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            product_auth,
+            secret_store: Some(secret_store),
+        }
     }
 }
 
@@ -96,6 +113,101 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
             .await
             .map_err(map_auth_error)?;
         Ok(submitted.account_id)
+    }
+
+    async fn resolve_stored_manual_token_value(
+        &self,
+        request: ExtensionCredentialStoredValueRequest,
+    ) -> Result<Option<secrecy::SecretString>, RebornServicesError> {
+        let Some(secret_store) = &self.secret_store else {
+            return Ok(None);
+        };
+        let selector = self
+            .product_auth
+            .runtime_credential_account_selection_service();
+        let account = selector
+            .select_unique_configured_runtime_account(
+                RuntimeCredentialAccountSelectionRequest::new(
+                    CredentialAccountSelectionRequest::new(
+                        request.scope.clone(),
+                        request.provider,
+                    )
+                    .for_extension(request.requester_extension),
+                    request.scope.clone(),
+                    RuntimeCredentialAccountSetup::ManualToken,
+                    Vec::new(),
+                ),
+            )
+            .await
+            .map_err(|error| match error {
+                AuthProductError::CredentialMissing
+                | AuthProductError::CrossScopeDenied
+                | AuthProductError::AccountSelectionRequired => None,
+                other => Some(map_auth_error(other.into())),
+            });
+        let account = match account {
+            Ok(account) => account,
+            Err(None) => return Ok(None),
+            Err(Some(error)) => return Err(error),
+        };
+        if account.status != CredentialAccountStatus::Configured {
+            return Ok(None);
+        }
+        let Some(handle) = account.access_secret else {
+            return Ok(None);
+        };
+        let scope = &request.scope.resource;
+        let lease = match secret_store.lease_once(scope, &handle).await {
+            Ok(lease) => lease,
+            Err(error) => return map_secret_store_lease_error(error),
+        };
+        match secret_store.consume(scope, lease.id).await {
+            Ok(material) => Ok(Some(material)),
+            Err(error) => map_secret_store_consume_error(error),
+        }
+    }
+}
+
+fn map_secret_store_lease_error(
+    error: SecretStoreError,
+) -> Result<Option<secrecy::SecretString>, RebornServicesError> {
+    match error {
+        SecretStoreError::UnknownSecret { .. } | SecretStoreError::SecretExpired => Ok(None),
+        SecretStoreError::StoreUnavailable { .. } | SecretStoreError::BackendMisconfigured { .. } => {
+            Err(services_error(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            ))
+        }
+        _ => Err(services_error(
+            RebornServicesErrorCode::Internal,
+            RebornServicesErrorKind::Internal,
+            500,
+            false,
+        )),
+    }
+}
+
+fn map_secret_store_consume_error(
+    error: SecretStoreError,
+) -> Result<Option<secrecy::SecretString>, RebornServicesError> {
+    match error {
+        SecretStoreError::UnknownLease { .. }
+        | SecretStoreError::LeaseConsumed { .. }
+        | SecretStoreError::LeaseRevoked { .. }
+        | SecretStoreError::LeaseExpired { .. }
+        | SecretStoreError::UnknownSecret { .. }
+        | SecretStoreError::SecretExpired => Ok(None),
+        SecretStoreError::StoreUnavailable { .. } | SecretStoreError::BackendMisconfigured { .. } => {
+            Err(services_error(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            ))
+        }
     }
 }
 
