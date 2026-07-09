@@ -86,7 +86,7 @@ function humanizeErrorToken(token) {
 // error message means a dialog shows `{"error":"...","kind":"..."}`, which reads
 // as "no error" to a user. Humanize the most specific token instead, and only
 // fall back to a non-JSON body when it is short enough to be a real message.
-export function describeApiError({ payload, body, statusText } = {}) {
+export function describeApiError({ payload, body, statusText, status } = {}) {
   if (payload && typeof payload === "object") {
     if (payload.validation_code) {
       const base = humanizeErrorToken(payload.validation_code);
@@ -107,7 +107,11 @@ export function describeApiError({ payload, body, statusText } = {}) {
   ) {
     return trimmed;
   }
-  return statusText || "Request failed";
+  if (statusText) return statusText;
+  if (typeof status === "number" && status > 0) {
+    return `Request failed (HTTP ${status})`;
+  }
+  return "Request failed";
 }
 
 export async function apiFetch(path, options = {}) {
@@ -130,7 +134,12 @@ export async function apiFetch(path, options = {}) {
   if (!response.ok) {
     const { text, payload } = await parseErrorBody(response);
     throw new ApiError(
-      describeApiError({ payload, body: text, statusText: response.statusText }),
+      describeApiError({
+        payload,
+        body: text,
+        statusText: response.statusText,
+        status: response.status,
+      }),
       {
         status: response.status,
         statusText: response.statusText,

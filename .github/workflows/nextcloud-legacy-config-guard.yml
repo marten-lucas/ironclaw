@@ -29,7 +29,7 @@ jobs:
               run: |
                   set -euo pipefail
 
-                    if git grep -nE 'nextcloud_talk_bot_secret|BOT_MENTION_REGEX|config\.toml.*nextcloud_talk|nextcloud_talk.*config\.toml' -- 'deployment/ct*_update.sh' 'deployment/ct*_full_update.sh' 'deployment/ct*_nextcloud_channel_update.sh' 'channels-src/nextcloud-talk/*.toml'; then
+                                    if git grep -nE 'nextcloud_talk_bot_secret|BOT_MENTION_REGEX|config\.toml.*nextcloud_talk|nextcloud_talk.*config\.toml' -- 'deployment/ct*_update.sh' 'deployment/ct*_full_update.sh' 'deployment/ct*_nextcloud_channel_update.sh' 'channels-src/nextcloud-talk/*.toml'; then
                     echo "::error::Legacy Nextcloud Talk config patching or bot-secret usage detected. Use the fake-user UI credentials and native channel path instead."
                     exit 1
                   fi

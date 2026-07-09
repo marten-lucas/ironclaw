@@ -209,6 +209,7 @@ pub use webui_inbound::{
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundAttachment,
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, WebUiTestExtensionConnectionRequest,
+    webui_attachment_capabilities,
 };
 pub use workflow::DefaultProductWorkflow;

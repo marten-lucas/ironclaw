@@ -39,6 +39,7 @@ pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension
 pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
+pub const WEBUI_V2_ROUTE_TEST_EXTENSION_CONNECTION: &str = "webui.v2.test_extension_connection";
 pub const WEBUI_V2_ROUTE_LIST_SKILLS: &str = "webui.v2.list_skills";
 pub const WEBUI_V2_ROUTE_SEARCH_SKILLS: &str = "webui.v2.search_skills";
 pub const WEBUI_V2_ROUTE_INSTALL_SKILL: &str = "webui.v2.install_skill";
@@ -111,6 +112,8 @@ pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
 pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
     "/api/webchat/v2/extensions/{package_id}/remove";
 pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str = "/api/webchat/v2/extensions/{package_id}/setup";
+pub const WEBUI_V2_PATTERN_SETUP_TEST_CONNECTION: &str =
+    "/api/webchat/v2/extensions/{package_id}/setup/test-connection";
 pub const WEBUI_V2_PATTERN_LIST_SKILLS: &str = "/api/webchat/v2/skills";
 pub const WEBUI_V2_PATTERN_SEARCH_SKILLS: &str = "/api/webchat/v2/skills/search";
 pub const WEBUI_V2_PATTERN_INSTALL_SKILL: &str = "/api/webchat/v2/skills/install";
@@ -183,6 +186,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         remove_extension_descriptor(),
         get_extension_setup_descriptor(),
         setup_extension_descriptor(),
+        test_extension_connection_descriptor(),
         list_skills_descriptor(),
         search_skills_descriptor(),
         install_skill_descriptor(),
@@ -840,6 +844,20 @@ fn setup_extension_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_SETUP_EXTENSION,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SETUP_EXTENSION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn test_extension_connection_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TEST_EXTENSION_CONNECTION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETUP_TEST_CONNECTION,
         mutation_policy(
             body_limit_kib(16),
             mutation_rate_limit(),

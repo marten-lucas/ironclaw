@@ -53,7 +53,8 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    WebUiSetupExtensionRequest, WebUiTestExtensionConnectionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1173,6 +1174,24 @@ pub async fn setup_extension(
     let response = state
         .services()
         .setup_extension(caller, package_ref, body)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/extensions/{package_id}/setup/test-connection`
+pub async fn test_extension_connection(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+    Json(body): Json<WebUiTestExtensionConnectionRequest>,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
+    let response = state
+        .services()
+        .test_extension_connection(caller, package_ref, body)
         .await?;
     Ok(Json(response))
 }

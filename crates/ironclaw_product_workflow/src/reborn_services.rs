@@ -49,7 +49,7 @@ use crate::{
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiSetupExtensionRequest, WebUiTestExtensionConnectionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -1406,6 +1406,18 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
+
+    /// Probe extension setup credentials/connectivity without mutating durable
+    /// setup state.
+    async fn test_extension_connection(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+        request: WebUiTestExtensionConnectionRequest,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        let _ = (caller, package_ref, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     /// LLM provider configuration: merged catalog + active selection.
     ///
@@ -3003,6 +3015,15 @@ impl RebornServicesApi for RebornServices {
             request,
         )
         .await
+    }
+
+    async fn test_extension_connection(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+        request: WebUiTestExtensionConnectionRequest,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        lifecycle_setup::test_extension_connection(caller, package_ref, request).await
     }
 
     async fn get_operator_status(
