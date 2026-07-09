@@ -388,6 +388,7 @@ pub struct RebornServices {
 }
 
 impl RebornServices {
+    #[cfg(any(feature = "root-llm-provider", test, feature = "test-support"))]
     /// The shared scoped secret store backing this composition.
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)

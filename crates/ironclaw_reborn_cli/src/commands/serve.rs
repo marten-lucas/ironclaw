@@ -180,6 +180,7 @@ impl ServeCommand {
         )?;
         let nextcloud_talk_config =
             crate::commands::serve_nextcloud::resolve_nextcloud_talk_config_for_serve(
+                config_file.as_ref().and_then(|file| file.nextcloud_talk.as_ref()),
                 &tenant_id,
                 &default_agent_id,
                 default_project_id.as_ref(),

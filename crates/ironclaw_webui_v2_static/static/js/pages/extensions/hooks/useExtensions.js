@@ -11,6 +11,7 @@ import {
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
+  testExtensionConnection,
   startExtensionOauth,
   fetchPairingRequests,
   approvePairingCode,
@@ -243,6 +244,12 @@ export function useSetupSubmit(packageRef, onSuccess) {
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
       if (onSuccess) onSuccess(res);
     },
+  });
+}
+
+export function useExtensionConnectionTest(packageRef) {
+  return useMutation({
+    mutationFn: ({ secrets, fields }) => testExtensionConnection(packageRef, secrets, fields),
   });
 }
 

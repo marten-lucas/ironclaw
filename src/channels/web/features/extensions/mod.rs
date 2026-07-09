@@ -22,6 +22,7 @@
 //! from credential-name format strings or pending-gate fields.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -33,6 +34,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::*;
+use crate::config::helpers::validate_operator_base_url;
 
 /// Derive the activation status for an installed extension.
 ///
@@ -773,6 +775,87 @@ pub(crate) async fn extensions_setup_submit_handler(
     }
 }
 
+pub(crate) async fn extensions_setup_test_connection_handler(
+    State(_state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(name): Path<String>,
+    Json(req): Json<ExtensionSetupRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+    if name.as_str() != "nextcloud-talk" {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "Connection tests are only implemented for nextcloud-talk".to_string(),
+        ));
+    }
+
+    let base_url = nextcloud_setup_value(&req, "nextcloud_talk_base_url")
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing nextcloud_talk_base_url".to_string()))?;
+    let bot_username = nextcloud_setup_value(&req, "nextcloud_talk_bot_username").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing nextcloud_talk_bot_username".to_string(),
+        )
+    })?;
+    let app_password = nextcloud_setup_value(&req, "nextcloud_talk_app_password").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing nextcloud_talk_app_password".to_string(),
+        )
+    })?;
+
+    validate_operator_base_url(base_url, "nextcloud_talk_base_url")
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to build HTTP client: {e}"),
+            )
+        })?;
+
+    let url = format!(
+        "{}/ocs/v2.php/cloud/capabilities?format=json",
+        base_url.trim_end_matches('/')
+    );
+    let response = client
+        .get(&url)
+        .basic_auth(bot_username, Some(app_password))
+        .header("OCS-APIRequest", "true")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Connection failed: {e}")))?;
+
+    let status = response.status();
+    let action = if status.is_success() {
+        ActionResponse::ok(format!("Connected to Nextcloud as {bot_username}."))
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        ActionResponse::fail(format!("Authentication failed ({status})"))
+    } else {
+        ActionResponse::fail(format!("Connection failed ({status})"))
+    };
+
+    Ok(Json(action))
+}
+
+fn nextcloud_setup_value<'a>(req: &'a ExtensionSetupRequest, name: &str) -> Option<&'a str> {
+    req.secrets
+        .get(name)
+        .or_else(|| req.fields.get(name))
+        .map(String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -788,7 +871,7 @@ mod tests {
         apply_extension_readiness_to_response, extension_phase_for_web,
         extensions_activate_handler, extensions_install_handler, extensions_list_handler,
         extensions_readiness_handler, extensions_remove_handler, extensions_setup_handler,
-        extensions_setup_submit_handler,
+        extensions_setup_submit_handler, extensions_setup_test_connection_handler,
     };
 
     use crate::channels::web::test_helpers::{
@@ -1086,6 +1169,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_extensions_setup_test_connection_succeeds_against_mock_nextcloud() {
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let nextcloud_app = Router::new().route(
+            "/ocs/v2.php/cloud/capabilities",
+            get(|| async { (StatusCode::OK, "{\"ocs\":true}") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, nextcloud_app)
+                .await
+                .expect("server");
+        });
+
+        let state = test_gateway_state(None);
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup/test-connection",
+                post(extensions_setup_test_connection_handler),
+            )
+            .with_state(state);
+
+        let body = serde_json::json!({
+            "secrets": {
+                "nextcloud_talk_base_url": format!("http://{}", addr),
+                "nextcloud_talk_bot_username": "ironclaw",
+                "nextcloud_talk_app_password": "secret"
+            }
+        });
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/nextcloud-talk/setup/test-connection")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        server.abort();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

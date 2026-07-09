@@ -4,6 +4,7 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import {
   useExtensionSetup,
+  useExtensionConnectionTest,
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
@@ -16,7 +17,10 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
   const [fieldValues, setFieldValues] = React.useState({});
+  const [connectionResult, setConnectionResult] = React.useState(null);
+  const isNextcloudTalk = extension?.packageRef?.id === "nextcloud-talk";
   const oauthMutation = useOauthSetup(extension?.packageRef);
+  const connectionTestMutation = useExtensionConnectionTest(extension?.packageRef);
 
   const submitMutation = useSetupSubmit(extension?.packageRef, (res) => {
     if (res.success !== false) {
@@ -33,6 +37,27 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     }
     submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
   }, [values, fieldValues, submitMutation]);
+  const handleTestConnection = React.useCallback(() => {
+    const secretPayload = {};
+    for (const [key, val] of Object.entries(values)) {
+      const trimmed = (val || "").trim();
+      if (trimmed) secretPayload[key] = trimmed;
+    }
+    connectionTestMutation.mutate(
+      { secrets: secretPayload, fields: fieldValues },
+      {
+        onSuccess: (res) => {
+          setConnectionResult({
+            tone: res?.success === false ? "error" : "success",
+            message: res?.message || "Connection test completed.",
+          });
+        },
+        onError: (error) => {
+          setConnectionResult({ tone: "error", message: error.message });
+        },
+      }
+    );
+  }, [values, fieldValues, connectionTestMutation]);
   const handleOauth = React.useCallback(
     (secret) => {
       const popup = window.open("about:blank", "_blank", "width=600,height=600");
@@ -242,9 +267,31 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           ${oauthMutation.error.message}
         </div>
       `}
+      ${connectionResult &&
+      html`
+        <div
+          className=${
+            connectionResult.tone === "error"
+              ? "mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+              : "mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
+          }
+        >
+          ${connectionResult.message}
+        </div>
+      `}
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <${Button} variant="ghost" onClick=${onClose}>${t("common.cancel") || "Cancel"}<//>
+        ${isNextcloudTalk &&
+        html`
+          <${Button}
+            variant="secondary"
+            onClick=${handleTestConnection}
+            disabled=${connectionTestMutation.isPending || submitMutation.isPending || oauthMutation.isPending}
+          >
+            ${connectionTestMutation.isPending ? t("llm.testing") : t("llm.testConnection")}
+          <//>
+        `}
         ${canActivate &&
         html`
         <${Button}
