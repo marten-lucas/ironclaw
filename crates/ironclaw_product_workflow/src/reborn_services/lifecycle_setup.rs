@@ -375,12 +375,26 @@ fn describe_nextcloud_ocs_meta_failure(body: &str) -> Option<String> {
     if status_code == 100 {
         return None;
     }
+    let status = meta
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim);
     let message = meta
         .get("message")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("Unknown Nextcloud OCS error");
+
+    // Some Nextcloud setups return OCS `statuscode: 200` with `status/message: OK`
+    // for successful capability probes. Treat this as success to avoid false negatives.
+    if status_code == 200
+        && (status.is_some_and(|v| v.eq_ignore_ascii_case("ok"))
+            || message.eq_ignore_ascii_case("ok"))
+    {
+        return None;
+    }
+
     Some(format!(
         "Nextcloud OCS rejected the request (statuscode {status_code}): {message}"
     ))
@@ -504,7 +518,7 @@ mod tests {
         WebUiTestExtensionConnectionRequest,
     };
 
-    use super::test_connection_value_with_fallback;
+    use super::{describe_nextcloud_ocs_meta_failure, test_connection_value_with_fallback};
 
     struct StoredValueService {
         value: Option<SecretString>,
@@ -602,5 +616,50 @@ mod tests {
             },
             AuthSurface::Web,
         )
+    }
+
+    #[test]
+    fn ocs_meta_accepts_statuscode_100() {
+        let body = r#"{
+            "ocs": {
+                "meta": {
+                    "status": "ok",
+                    "statuscode": 100,
+                    "message": "OK"
+                }
+            }
+        }"#;
+        assert_eq!(describe_nextcloud_ocs_meta_failure(body), None);
+    }
+
+    #[test]
+    fn ocs_meta_accepts_statuscode_200_with_ok_message() {
+        let body = r#"{
+            "ocs": {
+                "meta": {
+                    "status": "ok",
+                    "statuscode": 200,
+                    "message": "OK"
+                }
+            }
+        }"#;
+        assert_eq!(describe_nextcloud_ocs_meta_failure(body), None);
+    }
+
+    #[test]
+    fn ocs_meta_rejects_non_success_statuscode() {
+        let body = r#"{
+            "ocs": {
+                "meta": {
+                    "status": "failure",
+                    "statuscode": 997,
+                    "message": "Auth failed"
+                }
+            }
+        }"#;
+        assert_eq!(
+            describe_nextcloud_ocs_meta_failure(body),
+            Some("Nextcloud OCS rejected the request (statuscode 997): Auth failed".to_string())
+        );
     }
 }
