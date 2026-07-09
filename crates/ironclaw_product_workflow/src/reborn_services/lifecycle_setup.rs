@@ -84,17 +84,38 @@ pub(super) async fn test_extension_connection(
         ));
     }
 
-    let base_url = test_connection_value(&request, "nextcloud_talk_base_url").ok_or_else(|| {
-        validation_error("fields", WebUiInboundValidationCode::MissingField)
-    })?;
-    let bot_username = test_connection_value(&request, "nextcloud_talk_bot_username").ok_or_else(
-        || validation_error("fields", WebUiInboundValidationCode::MissingField),
-    )?;
-    let app_password = test_connection_value(&request, "nextcloud_talk_app_password").ok_or_else(
-        || validation_error("secrets", WebUiInboundValidationCode::MissingField),
-    )?;
+    let base_url = match test_connection_value(&request, "nextcloud_talk_base_url") {
+        Some(value) => value,
+        None => {
+            return Ok(connection_fail(
+                "Missing nextcloud_talk_base_url. Enter the URL in this dialog before testing."
+                    .to_string(),
+            ))
+        }
+    };
+    let bot_username = match test_connection_value(&request, "nextcloud_talk_bot_username") {
+        Some(value) => value,
+        None => {
+            return Ok(connection_fail(
+                "Missing nextcloud_talk_bot_username. Enter the username in this dialog before testing."
+                    .to_string(),
+            ))
+        }
+    };
+    let app_password = match test_connection_value(&request, "nextcloud_talk_app_password") {
+        Some(value) => value,
+        None => {
+            return Ok(connection_fail(
+                "Missing nextcloud_talk_app_password. 'Leave blank to keep' values are not reused by the connection test; re-enter app password to test."
+                    .to_string(),
+            ))
+        }
+    };
 
-    let normalized_base_url = normalize_test_base_url(base_url)?;
+    let normalized_base_url = match normalize_test_base_url(base_url) {
+        Ok(value) => value,
+        Err(message) => return Ok(connection_fail(message)),
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -182,9 +203,11 @@ fn test_connection_value<'a>(
         .filter(|value| !value.is_empty())
 }
 
-fn normalize_test_base_url(base_url: &str) -> Result<String, RebornServicesError> {
-    let parsed = Url::parse(base_url)
-        .map_err(|_| validation_error("fields", WebUiInboundValidationCode::InvalidValue))?;
+fn normalize_test_base_url(base_url: &str) -> Result<String, String> {
+    let parsed = Url::parse(base_url).map_err(|_| {
+        "Invalid nextcloud_talk_base_url. Use a full HTTPS URL like https://cloud.example.tld"
+            .to_string()
+    })?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
@@ -192,10 +215,10 @@ fn normalize_test_base_url(base_url: &str) -> Result<String, RebornServicesError
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        return Err(validation_error(
-            "fields",
-            WebUiInboundValidationCode::InvalidValue,
-        ));
+        return Err(
+            "Invalid nextcloud_talk_base_url. Use HTTPS and omit username/password, query, and fragment."
+                .to_string(),
+        );
     }
     let mut normalized = parsed.to_string();
     while normalized.ends_with('/') {
