@@ -22,15 +22,23 @@ Host policy expectations:
 - Signature mode (preferred):
   - Header X-Nextcloud-Talk-Signature
   - Header X-Nextcloud-Talk-Random
+- Bridge signature mode (native Nextcloud internal app path):
+  - Header X-Ironclaw-Signature
+  - Header X-Ironclaw-Timestamp
+  - Header X-Ironclaw-Nonce
+  - Signature base string: "{timestamp}\n{nonce}\n{raw_body}"
+  - Timestamp window: +/- 300s
+  - Replay guard: nonce is accepted once per active window
 - Transitional mode (temporary): if webhook secret is not configured, route remains active with allowlist/rate-limit/audit controls.
 
 Ingress behavior:
 1. Reject malformed payloads with HTTP 400.
 2. If signature is configured and invalid, return HTTP 401.
-3. Ignore bot-authored events and non-Create events with HTTP 200 (no-op).
-4. Mention gate is exact token @<bot_display_name>.
-5. If no exact mention, return HTTP 200 (no-op).
-6. On accepted mention event, submit inbound workflow and return HTTP 200 immediately.
+3. In bridge signature mode, stale timestamp or replay nonce is rejected with HTTP 401.
+4. Ignore bot-authored events and non-Create events with HTTP 200 (no-op).
+5. Mention gate is exact token @<bot_display_name>.
+6. If no exact mention, return HTTP 200 (no-op).
+7. On accepted mention event, submit inbound workflow and return HTTP 200 immediately.
 
 ## Outbound Contract
 

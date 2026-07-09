@@ -1,5 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
+use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use axum::{
@@ -64,10 +65,15 @@ use ironclaw_wasm_product_adapters::EgressPolicy;
 
 const NEXTCLOUD_SIGNATURE_HEADER: &str = "X-Nextcloud-Talk-Signature";
 const NEXTCLOUD_RANDOM_HEADER: &str = "X-Nextcloud-Talk-Random";
+const BRIDGE_SIGNATURE_HEADER: &str = "X-Ironclaw-Signature";
+const BRIDGE_TIMESTAMP_HEADER: &str = "X-Ironclaw-Timestamp";
+const BRIDGE_NONCE_HEADER: &str = "X-Ironclaw-Nonce";
 const NEXTCLOUD_ROUTE_ID: &str = "nextcloud_talk.events";
 const NEXTCLOUD_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(512 * 1024).unwrap();
 const NEXTCLOUD_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(6_000).unwrap();
 const NEXTCLOUD_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap();
+const BRIDGE_SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
+const BRIDGE_REPLAY_CACHE_LIMIT: usize = 50_000;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -233,6 +239,7 @@ pub fn build_nextcloud_talk_route_mount(
         project_id: config.project_id,
         user_id: config.user_id,
         delivery_driver,
+        replay_guard: Arc::new(Mutex::new(ReplayGuard::new())),
     };
 
     let descriptor = IngressRouteDescriptor::new(
@@ -275,6 +282,45 @@ struct NextcloudTalkRouteState {
         DeclaredEgressHost,
         EgressCredentialHandle,
     )>,
+    replay_guard: Arc<Mutex<ReplayGuard>>,
+}
+
+struct ReplayGuard {
+    seen_nonce_by_timestamp: HashMap<String, i64>,
+}
+
+impl ReplayGuard {
+    fn new() -> Self {
+        Self {
+            seen_nonce_by_timestamp: HashMap::new(),
+        }
+    }
+
+    fn record_once(&mut self, nonce: &str, now: i64, tolerance_seconds: i64) -> bool {
+        self.prune(now, tolerance_seconds);
+        if self.seen_nonce_by_timestamp.contains_key(nonce) {
+            return false;
+        }
+        if self.seen_nonce_by_timestamp.len() >= BRIDGE_REPLAY_CACHE_LIMIT {
+            self.prune(now, tolerance_seconds);
+            if self.seen_nonce_by_timestamp.len() >= BRIDGE_REPLAY_CACHE_LIMIT
+                && let Some(oldest_key) = self
+                    .seen_nonce_by_timestamp
+                    .iter()
+                    .min_by_key(|(_, ts)| *ts)
+                    .map(|(key, _)| key.clone())
+            {
+                self.seen_nonce_by_timestamp.remove(&oldest_key);
+            }
+        }
+        self.seen_nonce_by_timestamp.insert(nonce.to_string(), now);
+        true
+    }
+
+    fn prune(&mut self, now: i64, tolerance_seconds: i64) {
+        self.seen_nonce_by_timestamp
+            .retain(|_, seen_at| now.saturating_sub(*seen_at) <= tolerance_seconds);
+    }
 }
 
 enum NextcloudSecretResolutionError {
@@ -374,40 +420,20 @@ async fn nextcloud_talk_handler(
     };
 
     if let Some(shared_secret) = shared_secret.as_deref() {
-        let Some(signature) = headers
-            .get(NEXTCLOUD_SIGNATURE_HEADER)
-            .and_then(|value| value.to_str().ok())
-        else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(NextcloudErrorBody {
-                    error: "missing_signature",
-                }),
+        let verification = if headers.get(BRIDGE_SIGNATURE_HEADER).is_some() {
+            verify_bridge_signature(
+                &state.replay_guard,
+                shared_secret,
+                &headers,
+                body.as_ref(),
+                BRIDGE_SIGNATURE_TOLERANCE_SECONDS,
             )
-                .into_response();
+        } else {
+            verify_nextcloud_webhook_signature(shared_secret, &headers, body.as_ref())
         };
 
-        let Some(random) = headers
-            .get(NEXTCLOUD_RANDOM_HEADER)
-            .and_then(|value| value.to_str().ok())
-        else {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(NextcloudErrorBody {
-                    error: "missing_signature",
-                }),
-            )
-                .into_response();
-        };
-
-        if !verify_nextcloud_signature(shared_secret, random, body.as_ref(), signature) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(NextcloudErrorBody {
-                    error: "invalid_signature",
-                }),
-            )
-                .into_response();
+        if let Err(error) = verification {
+            return (StatusCode::UNAUTHORIZED, Json(NextcloudErrorBody { error })).into_response();
         }
     } else {
         tracing::warn!(
@@ -444,9 +470,22 @@ async fn nextcloud_talk_handler(
         }
     };
 
+    let (evidence_header_name, evidence_timestamp_header_name) =
+        if headers.get(BRIDGE_SIGNATURE_HEADER).is_some() {
+            (
+                BRIDGE_SIGNATURE_HEADER,
+                Some(BRIDGE_TIMESTAMP_HEADER.to_string()),
+            )
+        } else {
+            (
+                NEXTCLOUD_SIGNATURE_HEADER,
+                Some(NEXTCLOUD_RANDOM_HEADER.to_string()),
+            )
+        };
+
     let evidence = mark_request_signature_verified(
-        NEXTCLOUD_SIGNATURE_HEADER,
-        Some(NEXTCLOUD_RANDOM_HEADER.to_string()),
+        evidence_header_name,
+        evidence_timestamp_header_name,
         state.installation_id.as_str(),
     );
     let context = match TrustedInboundContext::from_verified_evidence(
@@ -604,6 +643,96 @@ fn verify_nextcloud_signature(secret: &str, random: &str, body: &[u8], signature
     }
 
     bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+}
+
+fn verify_nextcloud_webhook_signature(
+    secret: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), &'static str> {
+    let Some(signature) = headers
+        .get(NEXTCLOUD_SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err("missing_signature");
+    };
+
+    let Some(random) = headers
+        .get(NEXTCLOUD_RANDOM_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err("missing_signature");
+    };
+
+    if !verify_nextcloud_signature(secret, random, body, signature) {
+        return Err("invalid_signature");
+    }
+
+    Ok(())
+}
+
+fn verify_bridge_signature(
+    replay_guard: &Arc<Mutex<ReplayGuard>>,
+    secret: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    tolerance_seconds: i64,
+) -> Result<(), &'static str> {
+    let Some(timestamp_raw) = headers
+        .get(BRIDGE_TIMESTAMP_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err("missing_timestamp");
+    };
+    let timestamp = timestamp_raw.parse::<i64>().map_err(|_| "invalid_timestamp")?;
+
+    let now = Utc::now().timestamp();
+    if now.abs_diff(timestamp) > tolerance_seconds as u64 {
+        return Err("stale_timestamp");
+    }
+
+    let Some(nonce) = headers
+        .get(BRIDGE_NONCE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+    else {
+        return Err("missing_nonce");
+    };
+    if nonce.len() < 8 || nonce.len() > 128 {
+        return Err("invalid_nonce");
+    }
+
+    let Some(signature) = headers
+        .get(BRIDGE_SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err("missing_signature");
+    };
+    let Some(provided) = normalize_nextcloud_signature(signature) else {
+        return Err("invalid_signature");
+    };
+
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "invalid_signature")?;
+    mac.update(timestamp_raw.trim().as_bytes());
+    mac.update(b"\n");
+    mac.update(nonce.as_bytes());
+    mac.update(b"\n");
+    mac.update(body);
+    let expected = format!("{:x}", mac.finalize().into_bytes());
+
+    if expected.len() != provided.len() {
+        return Err("invalid_signature");
+    }
+    if !bool::from(expected.as_bytes().ct_eq(provided.as_bytes())) {
+        return Err("invalid_signature");
+    }
+
+    let mut guard = replay_guard.lock().map_err(|_| "replay_guard_unavailable")?;
+    if !guard.record_once(nonce, now, tolerance_seconds) {
+        return Err("replay_nonce");
+    }
+
+    Ok(())
 }
 
 fn normalize_nextcloud_signature(signature: &str) -> Option<String> {
@@ -771,6 +900,7 @@ impl ProductActorUserResolver for StaticNextcloudActorResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     fn sign(secret: &str, random: &str, body: &[u8]) -> String {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac init");
@@ -902,5 +1032,82 @@ mod tests {
 
         let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
         assert!(parsed.is_none(), "bot-authored messages must be ignored");
+    }
+
+    #[test]
+    fn bridge_signature_verification_rejects_nonce_replay() {
+        let secret = "bridge-secret";
+        let timestamp = Utc::now().timestamp().to_string();
+        let nonce = "abcd1234nonce";
+        let body = br#"{"eventId":"nc-talk:room:1"}"#;
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac init");
+        mac.update(timestamp.as_bytes());
+        mac.update(b"\n");
+        mac.update(nonce.as_bytes());
+        mac.update(b"\n");
+        mac.update(body);
+        let signature = format!("{:x}", mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(BRIDGE_TIMESTAMP_HEADER, HeaderValue::from_str(&timestamp).expect("ts"));
+        headers.insert(BRIDGE_NONCE_HEADER, HeaderValue::from_str(nonce).expect("nonce"));
+        headers.insert(
+            BRIDGE_SIGNATURE_HEADER,
+            HeaderValue::from_str(&signature).expect("signature"),
+        );
+
+        let replay_guard = Arc::new(Mutex::new(ReplayGuard::new()));
+        let first = verify_bridge_signature(
+            &replay_guard,
+            secret,
+            &headers,
+            body,
+            BRIDGE_SIGNATURE_TOLERANCE_SECONDS,
+        );
+        assert!(first.is_ok(), "first bridge request should verify");
+
+        let second = verify_bridge_signature(
+            &replay_guard,
+            secret,
+            &headers,
+            body,
+            BRIDGE_SIGNATURE_TOLERANCE_SECONDS,
+        );
+        assert_eq!(second, Err("replay_nonce"));
+    }
+
+    #[test]
+    fn bridge_signature_verification_rejects_stale_timestamp() {
+        let secret = "bridge-secret";
+        let timestamp = (Utc::now().timestamp() - 7200).to_string();
+        let nonce = "abcd1234nonce";
+        let body = br#"{"eventId":"nc-talk:room:1"}"#;
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac init");
+        mac.update(timestamp.as_bytes());
+        mac.update(b"\n");
+        mac.update(nonce.as_bytes());
+        mac.update(b"\n");
+        mac.update(body);
+        let signature = format!("{:x}", mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(BRIDGE_TIMESTAMP_HEADER, HeaderValue::from_str(&timestamp).expect("ts"));
+        headers.insert(BRIDGE_NONCE_HEADER, HeaderValue::from_str(nonce).expect("nonce"));
+        headers.insert(
+            BRIDGE_SIGNATURE_HEADER,
+            HeaderValue::from_str(&signature).expect("signature"),
+        );
+
+        let replay_guard = Arc::new(Mutex::new(ReplayGuard::new()));
+        let result = verify_bridge_signature(
+            &replay_guard,
+            secret,
+            &headers,
+            body,
+            BRIDGE_SIGNATURE_TOLERANCE_SECONDS,
+        );
+        assert_eq!(result, Err("stale_timestamp"));
     }
 }
