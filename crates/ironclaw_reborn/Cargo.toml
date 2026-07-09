@@ -13,6 +13,7 @@ publish = false
 [features]
 default = []
 root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
+libsql = ["dep:libsql"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",

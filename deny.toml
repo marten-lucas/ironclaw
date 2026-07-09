@@ -27,6 +27,12 @@ ignore = [
     # so the TRUNCATE bypass is not reachable from our guest surface. Remove once
     # wasmtime is upgraded to a patched release.
     "RUSTSEC-2026-0149",
+    # wasmtime-wasi: hard-link and rename destination permission bypass in the
+    # WASI layer (RUSTSEC-2026-0188). The same IronClaw sandbox boundary applies:
+    # guest modules are not granted host-controlled WASI filesystem capabilities,
+    # so this destination-permission bypass is not reachable from our surface.
+    # Remove once the wasmtime stack is upgraded to a patched release.
+    "RUSTSEC-2026-0188",
 ]
 
 [licenses]

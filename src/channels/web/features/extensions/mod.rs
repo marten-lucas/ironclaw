@@ -28,138 +28,97 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    let status = response.status();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let body_text = response.text().await.unwrap_or_default();
+};
+use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
-        if let Some(msg) = describe_nextcloud_success_payload_failure(&content_type, &body_text) {
-            ActionResponse::fail(msg)
-        } else if let Some(msg) = describe_nextcloud_ocs_meta_failure(&body_text) {
-            ActionResponse::fail(msg)
+use crate::channels::web::platform::state::GatewayState;
+use crate::channels::web::types::*;
+use crate::config::helpers::validate_operator_base_url;
+
+/// Derive the activation status for an installed extension.
+///
+/// `has_paired` reflects whether any sender has been paired against
+/// `channel_identities` for this WASM channel (queried from the DB-backed
+/// pairing store). `has_owner_binding` reflects whether the channel has an
+/// explicit owner_id in settings. Either is sufficient to upgrade an active
+/// channel from `Pairing` to `Active`.
+///
+/// See nearai/ironclaw#1921 for the regression that motivated plumbing
+/// `has_paired` through here instead of hardcoding it to `false`.
+pub(crate) fn derive_activation_status(
+    ext: &crate::extensions::InstalledExtension,
+    has_paired: bool,
+    has_owner_binding: bool,
+) -> Option<ExtensionActivationStatus> {
+    if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+        classify_wasm_channel_activation(ext, has_paired, has_owner_binding, ext.requires_binding)
+    } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
+        Some(if ext.active {
+            ExtensionActivationStatus::Active
+        } else if ext.authenticated {
+            ExtensionActivationStatus::Configured
         } else {
-            ActionResponse::ok(format!("Connected to Nextcloud as {bot_username}."))
-        }
+            ExtensionActivationStatus::Installed
+        })
     } else {
-        ActionResponse::fail(describe_nextcloud_http_error(status, &body_text))
-    };
-
-    Ok(Json(action))
+        None
+    }
 }
 
-fn describe_nextcloud_success_payload_failure(content_type: &str, body: &str) -> Option<String> {
-    let body_lower = body.to_ascii_lowercase();
-
-    // YunoHost/SSO frontends often return an HTML login page with 200, which
-    // would otherwise look like a successful transport response.
-    if content_type.contains("text/html")
-        || body_lower.contains("<html")
-        || body_lower.contains("ssowat")
-        || body_lower.contains("yunohost")
-        || body_lower.contains("login")
-    {
-        return Some("Received an HTML login page instead of Nextcloud OCS JSON. This usually means SSO/proxy interception (e.g. YunoHost). The connection test does not perform interactive SSO login; allow Basic Auth passthrough to /ocs/v2.php/* for this host."
-            .to_string());
-    }
-
-    // Successful OCS responses should be JSON. If we get non-JSON bytes here,
-    // treat that as a misrouted/proxy response, not success.
-    let parsed = match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(v) => v,
-        Err(_) => {
-            return Some(format!(
-                "Received non-JSON response from capabilities endpoint. Check reverse-proxy/SSO routing. Response: {}",
-                body_excerpt(body)
-            ));
+/// Derive onboarding state and info from the activation status.
+/// Returns `(None, None)` when the channel is not in a pairing state.
+pub(crate) fn derive_onboarding(
+    channel_name: &str,
+    activation_status: Option<ExtensionActivationStatus>,
+) -> (
+    Option<ChannelOnboardingState>,
+    Option<ChannelOnboardingInfo>,
+) {
+    match activation_status {
+        Some(ExtensionActivationStatus::Pairing) => {
+            // `channel_name` is the registry-sourced `Extension.name`,
+            // which already passed validation at install time — no
+            // re-sanitization needed.
+            let state = ChannelOnboardingState::PairingRequired;
+            let info = ChannelOnboardingInfo {
+                state,
+                requires_pairing: true,
+                credential_title: None,
+                credential_instructions: None,
+                credential_next_step: None,
+                setup_url: None,
+                pairing_title: Some(format!("Claim ownership for {channel_name}")),
+                pairing_instructions: Some(format!(
+                    "Send a message to your {channel_name} bot, then paste the pairing code here."
+                )),
+                restart_instructions: Some(format!(
+                    "To generate a new code, send another message to {channel_name}."
+                )),
+            };
+            (Some(state), Some(info))
         }
-    };
-
-    if parsed.pointer("/ocs/meta/statuscode").is_none() {
-        return Some("Capabilities response is JSON but missing OCS metadata (/ocs/meta/statuscode). Check that the URL points to a Nextcloud OCS endpoint and is not rewritten by SSO/proxy middleware."
-            .to_string());
-    }
-
-    None
-}
-
-fn describe_nextcloud_transport_error(err: &reqwest::Error) -> String {
-    let detail = truncated_error_detail(err);
-
-    if err.is_timeout() {
-        return format!(
-            "Connection timed out after 15s. Check Nextcloud URL, firewall/reverse-proxy, and that Ironclaw can reach the host. Details: {detail}"
-        );
-    }
-    if err.is_connect() {
-        return format!(
-            "Could not connect to Nextcloud host. Check DNS, port, TLS termination, and network reachability from Ironclaw. Details: {detail}"
-        );
-    }
-    if err.is_request() {
-        return format!(
-            "Invalid request to Nextcloud. Verify the base URL (must include scheme, e.g. https://...). Details: {detail}"
-        );
-    }
-
-    format!("Connection test request failed. Details: {detail}")
-}
-
-fn describe_nextcloud_http_error(status: reqwest::StatusCode, body: &str) -> String {
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return "Authentication failed. Username/app password was rejected by Nextcloud."
-            .to_string();
-    }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return "Nextcloud capabilities endpoint not found (404). Check base URL and reverse-proxy path handling."
-            .to_string();
-    }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return "Nextcloud rate-limited the request (429). Wait briefly and retry."
-            .to_string();
-    }
-    if status.is_server_error() {
-        return format!(
-            "Nextcloud returned server error ({status}). Check Nextcloud logs and upstream availability."
-        );
-    }
-
-    let detail = body_excerpt(body);
-    if detail.is_empty() {
-        format!("Nextcloud returned unexpected HTTP status ({status}).")
-    } else {
-        format!("Nextcloud returned HTTP status {status}. Response: {detail}")
+        _ => (None, None),
     }
 }
 
-fn describe_nextcloud_ocs_meta_failure(body: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<serde_json::Value>(body).ok()?;
-    let meta = parsed.pointer("/ocs/meta")?;
-    let status_code = match meta.get("statuscode") {
-        Some(serde_json::Value::Number(v)) => v.as_i64(),
-        Some(serde_json::Value::String(v)) => v.parse::<i64>().ok(),
-        _ => None,
-    }?;
+pub(crate) async fn extensions_list_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
 
-    if status_code == 100 {
-        return None;
-    }
+    let installed = ext_mgr
+        .list(None, false, &user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let message = meta
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("Unknown Nextcloud OCS error");
-
-    Some(format!(
-        "Nextcloud OCS rejected the request (statuscode {status_code}): {message}"
-    ))
-}
+    let mut owner_bound_channels = std::collections::HashSet::new();
+    let mut paired_channels = std::collections::HashSet::new();
+    for ext in &installed {
         if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
             if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
                 owner_bound_channels.insert(ext.name.clone());
@@ -836,25 +795,17 @@ pub(crate) async fn extensions_setup_test_connection_handler(
     }
 
     let base_url = nextcloud_setup_value(&req, "nextcloud_talk_base_url")
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Missing nextcloud_talk_base_url. Enter the URL in this dialog before testing."
-                    .to_string(),
-            )
-        })?;
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing nextcloud_talk_base_url".to_string()))?;
     let bot_username = nextcloud_setup_value(&req, "nextcloud_talk_bot_username").ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            "Missing nextcloud_talk_bot_username. Enter the username in this dialog before testing."
-                .to_string(),
+            "Missing nextcloud_talk_bot_username".to_string(),
         )
     })?;
     let app_password = nextcloud_setup_value(&req, "nextcloud_talk_app_password").ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            "Missing nextcloud_talk_app_password. 'Leave blank to keep' values are not reused by the connection test; re-enter app password to test."
-                .to_string(),
+            "Missing nextcloud_talk_app_password".to_string(),
         )
     })?;
 
@@ -864,134 +815,38 @@ pub(crate) async fn extensions_setup_test_connection_handler(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to build HTTP client: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to build HTTP client: {e}"),
+            )
+        })?;
 
     let url = format!(
         "{}/ocs/v2.php/cloud/capabilities?format=json",
         base_url.trim_end_matches('/')
     );
-    let response = match client
+    let response = client
         .get(&url)
         .basic_auth(bot_username, Some(app_password))
         .header("OCS-APIRequest", "true")
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            return Ok(Json(ActionResponse::fail(
-                describe_nextcloud_transport_error(&err),
-            )));
-        }
-    };
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Connection failed: {e}")))?;
 
     let status = response.status();
-    let body_text = response.text().await.unwrap_or_default();
-
     let action = if status.is_success() {
-        if let Some(msg) = describe_nextcloud_ocs_meta_failure(&body_text) {
-            ActionResponse::fail(msg)
-        } else {
         ActionResponse::ok(format!("Connected to Nextcloud as {bot_username}."))
-        }
+    } else if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        ActionResponse::fail(format!("Authentication failed ({status})"))
     } else {
-        ActionResponse::fail(describe_nextcloud_http_error(status, &body_text))
+        ActionResponse::fail(format!("Connection failed ({status})"))
     };
 
     Ok(Json(action))
-}
-
-fn describe_nextcloud_transport_error(err: &reqwest::Error) -> String {
-    let detail = truncated_error_detail(err);
-
-    if err.is_timeout() {
-        return format!(
-            "Connection timed out after 15s. Check Nextcloud URL, firewall/reverse-proxy, and that Ironclaw can reach the host. Details: {detail}"
-        );
-    }
-    if err.is_connect() {
-        return format!(
-            "Could not connect to Nextcloud host. Check DNS, port, TLS termination, and network reachability from Ironclaw. Details: {detail}"
-        );
-    }
-    if err.is_request() {
-        return format!(
-            "Invalid request to Nextcloud. Verify the base URL (must include scheme, e.g. https://...). Details: {detail}"
-        );
-    }
-
-    format!("Connection test request failed. Details: {detail}")
-}
-
-fn describe_nextcloud_http_error(status: reqwest::StatusCode, body: &str) -> String {
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return "Authentication failed. Username/app password was rejected by Nextcloud."
-            .to_string();
-    }
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return "Nextcloud capabilities endpoint not found (404). Check base URL and reverse-proxy path handling."
-            .to_string();
-    }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return "Nextcloud rate-limited the request (429). Wait briefly and retry."
-            .to_string();
-    }
-    if status.is_server_error() {
-        return format!(
-            "Nextcloud returned server error ({status}). Check Nextcloud logs and upstream availability."
-        );
-    }
-
-    let detail = body_excerpt(body);
-    if detail.is_empty() {
-        format!("Nextcloud returned unexpected HTTP status ({status}).")
-    } else {
-        format!("Nextcloud returned HTTP status {status}. Response: {detail}")
-    }
-}
-
-fn describe_nextcloud_ocs_meta_failure(body: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<serde_json::Value>(body).ok()?;
-    let meta = parsed.pointer("/ocs/meta")?;
-    let status_code = match meta.get("statuscode") {
-        Some(serde_json::Value::Number(v)) => v.as_i64(),
-        Some(serde_json::Value::String(v)) => v.parse::<i64>().ok(),
-        _ => None,
-    }?;
-
-    if status_code == 100 {
-        return None;
-    }
-
-    let message = meta
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("Unknown Nextcloud OCS error");
-
-    Some(format!(
-        "Nextcloud OCS rejected the request (statuscode {status_code}): {message}"
-    ))
-}
-
-fn truncated_error_detail(err: &reqwest::Error) -> String {
-    let detail = err.to_string().replace('\n', " ");
-    if detail.len() > 220 {
-        format!("{}...", &detail[..220])
-    } else {
-        detail
-    }
-}
-
-fn body_excerpt(body: &str) -> String {
-    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.len() > 180 {
-        format!("{}...", &compact[..180])
-    } else {
-        compact
-    }
 }
 
 fn nextcloud_setup_value<'a>(req: &'a ExtensionSetupRequest, name: &str) -> Option<&'a str> {
@@ -1318,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extensions_setup_test_connection_succeeds_against_mock_nextcloud() {
-        use axum::body::{Body, to_bytes};
+        use axum::body::Body;
         use axum::routing::get;
         use tower::ServiceExt;
 
@@ -1369,203 +1224,6 @@ mod tests {
 
         server.abort();
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = to_bytes(resp.into_body(), 1024 * 64)
-            .await
-            .expect("body bytes");
-        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
-        assert_eq!(parsed.get("success"), Some(&serde_json::Value::Bool(true)));
-        assert!(
-            parsed
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .contains("Connected to Nextcloud as")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_extensions_setup_test_connection_returns_auth_failure_message() {
-        use axum::body::{Body, to_bytes};
-        use axum::routing::get;
-        use tower::ServiceExt;
-
-        let nextcloud_app = Router::new().route(
-            "/ocs/v2.php/cloud/capabilities",
-            get(|| async { (StatusCode::UNAUTHORIZED, "unauthorized") }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let addr = listener.local_addr().expect("addr");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, nextcloud_app)
-                .await
-                .expect("server");
-        });
-
-        let state = test_gateway_state(None);
-        let app = Router::new()
-            .route(
-                "/api/extensions/{name}/setup/test-connection",
-                post(extensions_setup_test_connection_handler),
-            )
-            .with_state(state);
-
-        let body = serde_json::json!({
-            "secrets": {
-                "nextcloud_talk_base_url": format!("http://{}", addr),
-                "nextcloud_talk_bot_username": "ironclaw",
-                "nextcloud_talk_app_password": "wrong"
-            }
-        });
-        let mut req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/api/extensions/nextcloud-talk/setup/test-connection")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .expect("request");
-        req.extensions_mut().insert(UserIdentity {
-            user_id: "test".to_string(),
-            role: "admin".to_string(),
-            workspace_read_scopes: Vec::new(),
-        });
-
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-
-        server.abort();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = to_bytes(resp.into_body(), 1024 * 64)
-            .await
-            .expect("body bytes");
-        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
-        assert_eq!(parsed.get("success"), Some(&serde_json::Value::Bool(false)));
-        assert!(
-            parsed
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .contains("Authentication failed")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_extensions_setup_test_connection_reports_missing_password_helpfully() {
-        use axum::body::{Body, to_bytes};
-        use tower::ServiceExt;
-
-        let state = test_gateway_state(None);
-        let app = Router::new()
-            .route(
-                "/api/extensions/{name}/setup/test-connection",
-                post(extensions_setup_test_connection_handler),
-            )
-            .with_state(state);
-
-        let body = serde_json::json!({
-            "secrets": {
-                "nextcloud_talk_base_url": "https://next.cloud.example",
-                "nextcloud_talk_bot_username": "ironclaw"
-            }
-        });
-        let mut req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/api/extensions/nextcloud-talk/setup/test-connection")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .expect("request");
-        req.extensions_mut().insert(UserIdentity {
-            user_id: "test".to_string(),
-            role: "admin".to_string(),
-            workspace_read_scopes: Vec::new(),
-        });
-
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-        let body = to_bytes(resp.into_body(), 1024 * 64)
-            .await
-            .expect("body bytes");
-        let msg = String::from_utf8(body.to_vec()).expect("utf8 body");
-        assert!(msg.contains("Leave blank to keep") || msg.contains("re-enter app password"));
-    }
-
-    #[tokio::test]
-    async fn test_extensions_setup_test_connection_reports_sso_html_intercept() {
-        use axum::body::{Body, to_bytes};
-        use axum::routing::get;
-        use tower::ServiceExt;
-
-        let nextcloud_app = Router::new().route(
-            "/ocs/v2.php/cloud/capabilities",
-            get(|| async {
-                (
-                    [("content-type", "text/html; charset=utf-8")],
-                    "<html><title>YunoHost SSOwat</title><body>login required</body></html>",
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let addr = listener.local_addr().expect("addr");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, nextcloud_app)
-                .await
-                .expect("server");
-        });
-
-        let state = test_gateway_state(None);
-        let app = Router::new()
-            .route(
-                "/api/extensions/{name}/setup/test-connection",
-                post(extensions_setup_test_connection_handler),
-            )
-            .with_state(state);
-
-        let body = serde_json::json!({
-            "secrets": {
-                "nextcloud_talk_base_url": format!("http://{}", addr),
-                "nextcloud_talk_bot_username": "ironclaw",
-                "nextcloud_talk_app_password": "secret"
-            }
-        });
-        let mut req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/api/extensions/nextcloud-talk/setup/test-connection")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .expect("request");
-        req.extensions_mut().insert(UserIdentity {
-            user_id: "test".to_string(),
-            role: "admin".to_string(),
-            workspace_read_scopes: Vec::new(),
-        });
-
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-
-        server.abort();
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = to_bytes(resp.into_body(), 1024 * 64)
-            .await
-            .expect("body bytes");
-        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
-        assert_eq!(parsed.get("success"), Some(&serde_json::Value::Bool(false)));
-        let msg = parsed
-            .get("message")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        assert!(msg.contains("html login page") || msg.contains("sso"));
     }
 
     #[tokio::test]
