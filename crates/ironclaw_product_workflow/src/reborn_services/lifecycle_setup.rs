@@ -78,7 +78,7 @@ pub(super) async fn test_extension_connection(
     package_ref: LifecyclePackageRef,
     request: WebUiTestExtensionConnectionRequest,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    if package_ref.id != "nextcloud-talk" {
+    if package_ref.id.as_str() != "nextcloud-talk" {
         return Ok(connection_fail(
             "Connection tests are currently implemented only for nextcloud-talk.".to_string(),
         ));

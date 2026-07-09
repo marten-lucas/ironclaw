@@ -279,6 +279,19 @@ pub struct WebUiSetupExtensionRequest {
     pub payload: Option<serde_json::Value>,
 }
 
+/// Browser body for probing extension connectivity during setup.
+///
+/// `secrets` carries credential-like values (for example app passwords), while
+/// `fields` carries non-secret form values (for example base URLs or usernames).
+/// Handlers decide how each key is interpreted per extension package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiTestExtensionConnectionRequest {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secrets: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
+}
+
 /// Browser body for WebUI gate-resolution mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiResolveGateRequest {
