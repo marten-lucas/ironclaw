@@ -75,6 +75,10 @@ mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
 #[cfg(feature = "webui-v2-beta")]
+mod nextcloud_egress;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_delivery;
+#[cfg(feature = "webui-v2-beta")]
 mod nextcloud_talk_serve;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
@@ -223,6 +227,11 @@ pub use nearai_mcp::{
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
+#[cfg(feature = "webui-v2-beta")]
+pub use nextcloud_egress::{
+    NextcloudEgressCredential, NextcloudEgressCredentialError, NextcloudEgressCredentialProvider,
+    NextcloudProtocolHttpEgress, StaticNextcloudEgressCredentialProvider,
+};
 #[cfg(feature = "webui-v2-beta")]
 pub use nextcloud_talk_serve::{
     NextcloudTalkBuildError, NextcloudTalkRouteConfig, build_nextcloud_talk_route_mount,

@@ -44,6 +44,7 @@ webui-v2-beta = [
     "dep:ironclaw_reborn_identity",
     "ironclaw_reborn/webui-user-store",
     "ironclaw_product_adapters/host-auth-mint",
+    "dep:ironclaw_wasm_product_adapters",
     "libsql",
     "dep:axum",
     "dep:tower",

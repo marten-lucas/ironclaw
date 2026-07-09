@@ -1,0 +1,35 @@
+name: Nextcloud Legacy Config Guard
+
+on:
+    pull_request:
+        paths:
+            - "deployment/**"
+            - "channels-src/nextcloud-talk/**"
+            - ".github/workflows/nextcloud-legacy-config-guard.yml"
+
+permissions:
+    contents: read
+
+concurrency:
+    group: nextcloud-legacy-config-guard-${{ github.head_ref || github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    guard:
+        name: Detect legacy Nextcloud config drift
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Reject legacy Nextcloud config patches
+              run: |
+                  set -euo pipefail
+
+                    if git grep -nE 'nextcloud_talk_bot_secret|BOT_MENTION_REGEX|config\.toml.*nextcloud_talk|nextcloud_talk.*config\.toml' -- 'deployment/ct*_update.sh' 'deployment/ct*_full_update.sh' 'deployment/ct*_nextcloud_channel_update.sh' 'channels-src/nextcloud-talk/*.toml'; then
+                    echo "::error::Legacy Nextcloud Talk config patching or bot-secret usage detected. Use the fake-user UI credentials and native channel path instead."
+                    exit 1
+                  fi

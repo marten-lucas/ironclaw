@@ -51,10 +51,14 @@ use thiserror::Error;
 use ironclaw_secrets::{SecretStore, SecretStoreError};
 
 use crate::RebornRuntime;
+use crate::nextcloud_delivery::{NextcloudTalkFinalReplyDriver, RuntimeCredentialNextcloudEgressProvider};
+use crate::nextcloud_egress::NextcloudProtocolHttpEgress;
 use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
 };
 use crate::webui_serve::PublicRouteMount;
+use ironclaw_product_adapters::{DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle};
+use ironclaw_wasm_product_adapters::EgressPolicy;
 
 const NEXTCLOUD_SIGNATURE_HEADER: &str = "X-Nextcloud-Talk-Signature";
 const NEXTCLOUD_RANDOM_HEADER: &str = "X-Nextcloud-Talk-Random";
@@ -74,6 +78,10 @@ pub struct NextcloudTalkRouteConfig {
     pub extension_id: String,
     pub webhook_path: String,
     pub bot_name: String,
+    /// Hostname of the Nextcloud instance (e.g. `next.cloud.example.tld`).
+    /// Used to construct outbound egress requests. When `None`, outbound
+    /// delivery is disabled and only inbound webhook parsing is active.
+    pub nextcloud_host: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -90,7 +98,7 @@ pub fn build_nextcloud_talk_route_mount(
     runtime: &RebornRuntime,
     config: NextcloudTalkRouteConfig,
 ) -> Result<PublicRouteMount, NextcloudTalkBuildError> {
-    let _local_runtime = runtime
+    let local_runtime = runtime
         .services()
         .local_runtime
         .as_ref()
@@ -146,6 +154,8 @@ pub fn build_nextcloud_talk_route_mount(
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
 
     let workflow_binding = binding.clone();
+    let delivery_binding: Arc<dyn ironclaw_product_workflow::ConversationBindingService> =
+        Arc::new(binding.clone());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding,
@@ -157,6 +167,55 @@ pub fn build_nextcloud_talk_route_mount(
         Arc::new(InMemoryIdempotencyLedger::default()),
         Arc::new(workflow_binding),
     ));
+
+    // Build the outbound delivery driver if a Nextcloud host is configured.
+    let delivery_driver = if let Some(nextcloud_host_str) = config.nextcloud_host.clone() {
+        let nextcloud_host = DeclaredEgressHost::new(&nextcloud_host_str).map_err(|err| {
+            NextcloudTalkBuildError::InvalidConfig {
+                field: "nextcloud_host",
+                reason: err.to_string(),
+            }
+        })?;
+        let app_password_handle =
+            EgressCredentialHandle::new("nextcloud_talk_app_password").map_err(|err| {
+                NextcloudTalkBuildError::InvalidConfig {
+                    field: "nextcloud_talk_app_password",
+                    reason: err.to_string(),
+                }
+            })?;
+        let credential_provider = Arc::new(RuntimeCredentialNextcloudEgressProvider::new(
+            Arc::clone(&runtime_credential_accounts),
+            Arc::clone(&secret_store),
+            requester_extension.clone(),
+            config.tenant_id.clone(),
+            config.agent_id.clone(),
+            config.project_id.clone(),
+            config.user_id.clone(),
+        ));
+        let egress_policy = EgressPolicy::new([DeclaredEgressTarget::new(
+            nextcloud_host.clone(),
+            Some(app_password_handle.clone()),
+        )]);
+        let host_egress_port = local_runtime
+            .host_runtime_http_egress
+            .clone()
+            .ok_or(NextcloudTalkBuildError::DurableHostStateUnavailable)?;
+        let egress = Arc::new(NextcloudProtocolHttpEgress::new(
+            host_egress_port,
+            credential_provider,
+            egress_policy,
+            ironclaw_host_api::ResourceScope::system(),
+        ));
+        let driver = NextcloudTalkFinalReplyDriver::new(
+            runtime.webui_turn_coordinator(),
+            runtime.webui_thread_service(),
+            delivery_binding,
+            egress,
+        );
+        Some((Arc::new(driver), nextcloud_host, app_password_handle))
+    } else {
+        None
+    };
 
     let state = NextcloudTalkRouteState {
         adapter_id,
@@ -171,6 +230,7 @@ pub fn build_nextcloud_talk_route_mount(
         agent_id: config.agent_id,
         project_id: config.project_id,
         user_id: config.user_id,
+        delivery_driver,
     };
 
     let descriptor = IngressRouteDescriptor::new(
@@ -206,6 +266,9 @@ struct NextcloudTalkRouteState {
     agent_id: AgentId,
     project_id: Option<ProjectId>,
     user_id: UserId,
+    /// Outbound delivery driver: (driver, nextcloud_host, credential_handle).
+    /// `None` when no Nextcloud host is configured (inbound-only mode).
+    delivery_driver: Option<(Arc<NextcloudTalkFinalReplyDriver>, DeclaredEgressHost, EgressCredentialHandle)>,
 }
 
 enum NextcloudSecretResolutionError {
@@ -292,15 +355,7 @@ async fn nextcloud_talk_handler(
 ) -> Response {
     let shared_secret = match resolve_nextcloud_webhook_secret(&state).await {
         Ok(secret) => secret,
-        Err(NextcloudSecretResolutionError::Missing) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(NextcloudErrorBody {
-                    error: "missing_signature_secret",
-                }),
-            )
-                .into_response();
-        }
+        Err(NextcloudSecretResolutionError::Missing) => None,
         Err(NextcloudSecretResolutionError::Backend) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -312,45 +367,48 @@ async fn nextcloud_talk_handler(
         }
     };
 
-    let Some(signature) = headers
-        .get(NEXTCLOUD_SIGNATURE_HEADER)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(NextcloudErrorBody {
-                error: "missing_signature",
-            }),
-        )
-            .into_response();
-    };
+    if let Some(shared_secret) = shared_secret.as_deref() {
+        let Some(signature) = headers
+            .get(NEXTCLOUD_SIGNATURE_HEADER)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(NextcloudErrorBody {
+                    error: "missing_signature",
+                }),
+            )
+                .into_response();
+        };
 
-    let Some(random) = headers
-        .get(NEXTCLOUD_RANDOM_HEADER)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(NextcloudErrorBody {
-                error: "missing_signature",
-            }),
-        )
-            .into_response();
-    };
+        let Some(random) = headers
+            .get(NEXTCLOUD_RANDOM_HEADER)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(NextcloudErrorBody {
+                    error: "missing_signature",
+                }),
+            )
+                .into_response();
+        };
 
-    if !verify_nextcloud_signature(
-        &shared_secret,
-        random,
-        body.as_ref(),
-        signature,
-    ) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(NextcloudErrorBody {
-                error: "invalid_signature",
-            }),
-        )
-            .into_response();
+        if !verify_nextcloud_signature(shared_secret, random, body.as_ref(), signature) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(NextcloudErrorBody {
+                    error: "invalid_signature",
+                }),
+            )
+                .into_response();
+        }
+    } else {
+        tracing::warn!(
+            target = "ironclaw::reborn::nextcloud_talk",
+            webhook_path = %state.webhook_path,
+            "nextcloud talk webhook signature secret is not configured; running in transitional allowlist/rate-limit mode"
+        );
     }
 
     let event = match serde_json::from_slice::<TalkEvent>(body.as_ref()) {
@@ -415,8 +473,32 @@ async fn nextcloud_talk_handler(
         }
     };
 
-    match state.workflow.submit_inbound(envelope).await {
-        Ok(_) => (StatusCode::OK, "ok").into_response(),
+    match state.workflow.submit_inbound(envelope.clone()).await {
+        Ok(ack) => {
+            // If a delivery driver is wired and the turn was accepted, spawn
+            // an async task to poll for completion and post the reply back.
+            if let Some((driver, nextcloud_host, app_password_handle)) = &state.delivery_driver {
+                if let ironclaw_product_adapters::ProductInboundAck::Accepted {
+                    submitted_run_id,
+                    ..
+                } = ack
+                {
+                    let driver = Arc::clone(driver);
+                    driver.spawn_delivery(
+                        envelope.adapter_id().clone(),
+                        envelope.installation_id().clone(),
+                        envelope.external_actor_ref().clone(),
+                        envelope.external_conversation_ref().clone(),
+                        envelope.external_event_id().clone(),
+                        envelope.auth_claim().clone(),
+                        submitted_run_id,
+                        app_password_handle.clone(),
+                        nextcloud_host.clone(),
+                    );
+                }
+            }
+            (StatusCode::OK, "ok").into_response()
+        }
         Err(error) => {
             tracing::warn!(
                 target = "ironclaw::reborn::nextcloud_talk",
@@ -437,7 +519,7 @@ async fn nextcloud_talk_handler(
 
 async fn resolve_nextcloud_webhook_secret(
     state: &NextcloudTalkRouteState,
-) -> Result<String, NextcloudSecretResolutionError> {
+) -> Result<Option<String>, NextcloudSecretResolutionError> {
     let provider = AuthProviderId::new("nextcloud_talk_webhook_secret")
         .map_err(|_| NextcloudSecretResolutionError::Backend)?;
     let scope = AuthProductScope::new(
@@ -470,8 +552,10 @@ async fn resolve_nextcloud_webhook_secret(
             _ => NextcloudSecretResolutionError::Backend,
         })?;
     let handle = account
-        .access_secret
-        .ok_or(NextcloudSecretResolutionError::Missing)?;
+        .access_secret;
+    let Some(handle) = handle else {
+        return Ok(None);
+    };
     let lease = state
         .secret_store
         .lease_once(&account.scope.resource, &handle)
@@ -482,7 +566,7 @@ async fn resolve_nextcloud_webhook_secret(
         .consume(&account.scope.resource, lease.id)
         .await
         .map_err(map_secret_store_error)?;
-    Ok(material.expose_secret().to_string())
+    Ok(Some(material.expose_secret().to_string()))
 }
 
 fn map_secret_store_error(error: SecretStoreError) -> NextcloudSecretResolutionError {

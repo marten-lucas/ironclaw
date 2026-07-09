@@ -433,4 +433,10 @@ mod tests {
         assert!(!is_exact_mention_for_bot("ironclaw please help", "ironclaw"));
         assert!(is_exact_mention_for_bot("@ironclaw please help", "ironclaw"));
     }
+
+    #[test]
+    fn exact_mention_supports_configured_display_name() {
+        assert!(!is_exact_mention_for_bot("@ironclaw please help", "helper-bot"));
+        assert!(is_exact_mention_for_bot("@helper-bot please help", "helper-bot"));
+    }
 }

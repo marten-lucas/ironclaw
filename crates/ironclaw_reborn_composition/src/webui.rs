@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 
@@ -15,7 +15,7 @@ use ironclaw_product_workflow::{
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
     StaticExtensionRuntimeStatusService, WebUiAuthenticatedCaller,
 };
-use ironclaw_reborn_config::{RebornBootConfig, RebornConfigFile};
+use ironclaw_reborn_config::RebornBootConfig;
 
 use ironclaw_triggers::TriggerRepository;
 
@@ -282,20 +282,20 @@ fn boot_config_extension_runtime_status_service(
     boot: &ironclaw_reborn_config::RebornBootConfig,
 ) -> StaticExtensionRuntimeStatusService {
     let mut statuses = HashMap::new();
-    let config = RebornConfigFile::load(&boot.home().config_file_path())
-        .ok()
-        .flatten();
 
-    if let Some(nextcloud) = config.as_ref().and_then(|cfg| cfg.nextcloud_talk.as_ref()) {
-        let status = if nextcloud.enabled == Some(true) {
-            "mounted"
-        } else {
-            "disabled"
-        };
-        statuses.insert("nextcloud-talk".to_string(), status.to_string());
+    let nextcloud_extension_dir = boot
+        .home()
+        .path()
+        .join("local-dev")
+        .join("system")
+        .join("extensions")
+        .join("nextcloud-talk");
+    let status = if nextcloud_extension_dir.exists() {
+        "mounted"
     } else {
-        statuses.insert("nextcloud-talk".to_string(), "disabled".to_string());
-    }
+        "disabled"
+    };
+    statuses.insert("nextcloud-talk".to_string(), status.to_string());
 
     StaticExtensionRuntimeStatusService::new(statuses)
 }

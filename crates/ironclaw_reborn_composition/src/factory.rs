@@ -644,7 +644,6 @@ impl RebornServices {
             local_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_runtime: None,
-            #[cfg(any(feature = "root-llm-provider", feature = "test-support"))]
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
         }
     }
