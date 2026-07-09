@@ -518,7 +518,10 @@ mod tests {
         WebUiTestExtensionConnectionRequest,
     };
 
-    use super::{describe_nextcloud_ocs_meta_failure, test_connection_value_with_fallback};
+    use super::{
+        describe_nextcloud_http_error, describe_nextcloud_ocs_meta_failure,
+        test_connection_value_with_fallback,
+    };
 
     struct StoredValueService {
         value: Option<SecretString>,
@@ -660,6 +663,22 @@ mod tests {
         assert_eq!(
             describe_nextcloud_ocs_meta_failure(body),
             Some("Nextcloud OCS rejected the request (statuscode 997): Auth failed".to_string())
+        );
+    }
+
+    #[test]
+    fn http_error_maps_auth_and_server_statuses() {
+        let auth_message = describe_nextcloud_http_error(reqwest::StatusCode::UNAUTHORIZED, "");
+        assert!(
+            auth_message.contains("Authentication failed"),
+            "expected auth-specific guidance"
+        );
+
+        let server_message =
+            describe_nextcloud_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "oops");
+        assert!(
+            server_message.contains("server error"),
+            "expected server-specific guidance"
         );
     }
 }

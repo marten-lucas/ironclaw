@@ -834,4 +834,73 @@ mod tests {
             "ironclaw hello"
         );
     }
+
+    #[test]
+    fn parse_talk_event_accepts_create_with_exact_mention() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("user-123".to_string()),
+                name: Some("Marten".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("42".to_string()),
+                content: Some("@ironclaw please summarize this".to_string()),
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-alpha".to_string()),
+            }),
+        };
+
+        let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
+        assert!(
+            parsed.is_some(),
+            "exact mention must produce inbound payload"
+        );
+    }
+
+    #[test]
+    fn parse_talk_event_ignores_create_without_exact_mention() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("user-123".to_string()),
+                name: Some("Marten".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("42".to_string()),
+                content: Some("ironclaw please summarize this".to_string()),
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-alpha".to_string()),
+            }),
+        };
+
+        let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
+        assert!(parsed.is_none(), "non-mentioned messages must be ignored");
+    }
+
+    #[test]
+    fn parse_talk_event_ignores_bot_authored_messages() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("application".to_string()),
+                id: Some("bots/ironclaw".to_string()),
+                name: Some("Ironclaw".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("42".to_string()),
+                content: Some("@ironclaw loop me".to_string()),
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-alpha".to_string()),
+            }),
+        };
+
+        let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
+        assert!(parsed.is_none(), "bot-authored messages must be ignored");
+    }
 }

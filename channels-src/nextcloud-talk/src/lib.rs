@@ -439,4 +439,82 @@ mod tests {
         assert!(!is_exact_mention_for_bot("@ironclaw please help", "helper-bot"));
         assert!(is_exact_mention_for_bot("@helper-bot please help", "helper-bot"));
     }
+
+    #[test]
+    fn render_outbound_sets_ocs_and_json_headers() {
+        let envelope = OutboundEnvelope {
+            outbound_json: serde_json::json!({
+                "payload": {
+                    "final_reply": {
+                        "text": "Hello from Ironclaw"
+                    }
+                },
+                "target": {
+                    "external_conversation_ref": {
+                        "conversation_id": "room-alpha",
+                        "reply_target_message_id": "123"
+                    }
+                }
+            })
+            .to_string(),
+        };
+
+        let rendered = NextcloudTalkAdapter::render_outbound(envelope).expect("render outbound");
+        let payload: serde_json::Value =
+            serde_json::from_str(&rendered.egress_request_json).expect("rendered json");
+
+        let headers = payload
+            .get("headers")
+            .and_then(serde_json::Value::as_array)
+            .expect("headers array");
+
+        assert!(headers.iter().any(|h| {
+            h.get("name").and_then(serde_json::Value::as_str) == Some("Content-Type")
+                && h.get("value").and_then(serde_json::Value::as_str)
+                    == Some("application/json")
+        }));
+        assert!(headers.iter().any(|h| {
+            h.get("name").and_then(serde_json::Value::as_str) == Some("Accept")
+                && h.get("value").and_then(serde_json::Value::as_str)
+                    == Some("application/json")
+        }));
+        assert!(headers.iter().any(|h| {
+            h.get("name").and_then(serde_json::Value::as_str) == Some("OCS-APIRequest")
+                && h.get("value").and_then(serde_json::Value::as_str) == Some("true")
+        }));
+    }
+
+    #[test]
+    fn render_outbound_reply_to_defaults_to_zero_without_message_id() {
+        let envelope = OutboundEnvelope {
+            outbound_json: serde_json::json!({
+                "payload": {
+                    "final_reply": {
+                        "text": "Hello from Ironclaw"
+                    }
+                },
+                "target": {
+                    "external_conversation_ref": {
+                        "conversation_id": "room-alpha"
+                    }
+                }
+            })
+            .to_string(),
+        };
+
+        let rendered = NextcloudTalkAdapter::render_outbound(envelope).expect("render outbound");
+        let payload: serde_json::Value =
+            serde_json::from_str(&rendered.egress_request_json).expect("rendered json");
+        let body = payload
+            .get("body")
+            .and_then(serde_json::Value::as_array)
+            .expect("body bytes");
+
+        let bytes = body
+            .iter()
+            .map(|v| v.as_u64().expect("byte") as u8)
+            .collect::<Vec<_>>();
+        let body_json: serde_json::Value = serde_json::from_slice(&bytes).expect("body json");
+        assert_eq!(body_json.get("replyTo"), Some(&serde_json::Value::from(0_u64)));
+    }
 }

@@ -210,15 +210,43 @@ impl NextcloudTalkFinalReplyDriver {
             .with_credential_handle(Some(app_password_handle));
 
         use ironclaw_product_adapters::ProtocolHttpEgress;
-        self.egress
+        let response = self
+            .egress
             .send(request)
             .await
             .map_err(|error| NextcloudDeliveryError::Egress(format!("{error:?}")))?;
+
+        let http_status = response.status();
+        let http_status_class = http_status / 100;
+        if !(200..300).contains(&http_status) {
+            let retry_decision = nextcloud_retry_decision(http_status).to_string();
+            let detail = nextcloud_ocs_error_detail(response.body())
+                .unwrap_or_else(|| body_excerpt_bytes(response.body()));
+
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_delivery",
+                %run_id,
+                room_token = %room_token,
+                http_status,
+                http_status_class,
+                retry_decision = %retry_decision,
+                error_detail = %detail,
+                "Nextcloud Talk final reply rejected by remote OCS endpoint"
+            );
+
+            return Err(NextcloudDeliveryError::EgressHttp {
+                status: http_status,
+                retry_decision,
+                detail,
+            });
+        }
 
         tracing::debug!(
             target = "ironclaw::reborn::nextcloud_delivery",
             %run_id,
             room_token = %room_token,
+            http_status,
+            http_status_class,
             "Nextcloud Talk final reply delivered successfully"
         );
 
@@ -293,6 +321,57 @@ pub(crate) enum NextcloudDeliveryError {
     EgressRequest(String),
     #[error("Nextcloud Talk delivery egress failed: {0}")]
     Egress(String),
+    #[error(
+        "Nextcloud Talk delivery egress HTTP failure: status={status} retry_decision={retry_decision} detail={detail}"
+    )]
+    EgressHttp {
+        status: u16,
+        retry_decision: String,
+        detail: String,
+    },
+}
+
+fn nextcloud_retry_decision(status: u16) -> &'static str {
+    if status == 429 || status >= 500 {
+        "retryable"
+    } else {
+        "permanent"
+    }
+}
+
+fn nextcloud_ocs_error_detail(body: &[u8]) -> Option<String> {
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let meta = parsed.pointer("/ocs/meta")?;
+    let status_code = meta
+        .get("statuscode")
+        .and_then(|v| match v {
+            serde_json::Value::Number(n) => n.as_i64(),
+            serde_json::Value::String(s) => s.parse::<i64>().ok(),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let message = meta
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("unknown");
+    Some(format!(
+        "ocs_meta_statuscode={status_code} message={message}"
+    ))
+}
+
+fn body_excerpt_bytes(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return "<empty body>".to_string();
+    }
+    if compact.len() > 180 {
+        format!("{}...", &compact[..180])
+    } else {
+        compact
+    }
 }
 
 /// A `NextcloudEgressCredentialProvider` that resolves credentials from the
@@ -401,7 +480,10 @@ fn reply_to_message_id(
 mod tests {
     use ironclaw_product_adapters::ExternalConversationRef;
 
-    use super::reply_to_message_id;
+    use super::{
+        body_excerpt_bytes, nextcloud_ocs_error_detail, nextcloud_retry_decision,
+        reply_to_message_id,
+    };
 
     #[test]
     fn reply_to_falls_back_to_zero_without_message_id() {
@@ -419,6 +501,40 @@ mod tests {
                 .expect("conversation ref");
 
         assert_eq!(reply_to_message_id(&conversation), 42);
+    }
+
+    #[test]
+    fn retry_decision_marks_5xx_and_429_as_retryable() {
+        assert_eq!(nextcloud_retry_decision(500), "retryable");
+        assert_eq!(nextcloud_retry_decision(503), "retryable");
+        assert_eq!(nextcloud_retry_decision(429), "retryable");
+        assert_eq!(nextcloud_retry_decision(401), "permanent");
+        assert_eq!(nextcloud_retry_decision(404), "permanent");
+    }
+
+    #[test]
+    fn ocs_error_detail_extracts_meta_fields() {
+        let body = br#"{
+            "ocs": {
+                "meta": {
+                    "status": "failure",
+                    "statuscode": 997,
+                    "message": "Auth failed"
+                }
+            }
+        }"#;
+        assert_eq!(
+            nextcloud_ocs_error_detail(body),
+            Some("ocs_meta_statuscode=997 message=Auth failed".to_string())
+        );
+    }
+
+    #[test]
+    fn body_excerpt_handles_empty_and_long_bodies() {
+        assert_eq!(body_excerpt_bytes(b""), "<empty body>");
+        let long = "a".repeat(260);
+        let excerpt = body_excerpt_bytes(long.as_bytes());
+        assert!(excerpt.ends_with("..."));
     }
 }
 
