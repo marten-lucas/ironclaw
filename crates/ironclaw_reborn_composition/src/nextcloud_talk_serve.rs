@@ -17,15 +17,15 @@ use ironclaw_auth::{
     CredentialAccountSelectionRequest,
 };
 use ironclaw_conversations::InMemoryConversationServices;
-use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope,
-    RuntimeCredentialAccountSetup, TenantId, UserId,
-};
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
     IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
     WebSocketOriginPolicy,
+};
+use ironclaw_host_api::{
+    AgentId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope,
+    RuntimeCredentialAccountSetup, TenantId, UserId,
 };
 use ironclaw_product_adapters::auth::mark_request_signature_verified;
 use ironclaw_product_adapters::external::{
@@ -43,15 +43,17 @@ use ironclaw_product_workflow::{
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     StaticProductInstallationResolver,
 };
+use ironclaw_secrets::{SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
-use ironclaw_secrets::{SecretStore, SecretStoreError};
 
 use crate::RebornRuntime;
-use crate::nextcloud_delivery::{NextcloudTalkFinalReplyDriver, RuntimeCredentialNextcloudEgressProvider};
+use crate::nextcloud_delivery::{
+    NextcloudDeliveryTask, NextcloudTalkFinalReplyDriver, RuntimeCredentialNextcloudEgressProvider,
+};
 use crate::nextcloud_egress::NextcloudProtocolHttpEgress;
 use crate::product_auth_runtime_credentials::{
     RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
@@ -112,18 +114,20 @@ pub fn build_nextcloud_talk_route_mount(
     let runtime_credential_accounts = product_auth.runtime_credential_account_selection_service();
     let secret_store = runtime.services().secret_store();
 
-    let adapter_id = ProductAdapterId::new(&format!("{}/inbound", config.extension_id)).map_err(
-        |err| NextcloudTalkBuildError::InvalidConfig {
-            field: "extension_id",
-            reason: err.to_string(),
-        },
-    )?;
-    let installation_id = AdapterInstallationId::new(config.extension_id.clone()).map_err(|err| {
-        NextcloudTalkBuildError::InvalidConfig {
-            field: "extension_id",
-            reason: format!("invalid installation id from extension id: {err}"),
-        }
-    })?;
+    let adapter_id =
+        ProductAdapterId::new(format!("{}/inbound", config.extension_id)).map_err(|err| {
+            NextcloudTalkBuildError::InvalidConfig {
+                field: "extension_id",
+                reason: err.to_string(),
+            }
+        })?;
+    let installation_id =
+        AdapterInstallationId::new(config.extension_id.clone()).map_err(|err| {
+            NextcloudTalkBuildError::InvalidConfig {
+                field: "extension_id",
+                reason: format!("invalid installation id from extension id: {err}"),
+            }
+        })?;
     let requester_extension = ExtensionId::new(config.extension_id.clone()).map_err(|err| {
         NextcloudTalkBuildError::InvalidConfig {
             field: "extension_id",
@@ -176,12 +180,10 @@ pub fn build_nextcloud_talk_route_mount(
                 reason: err.to_string(),
             }
         })?;
-        let app_password_handle =
-            EgressCredentialHandle::new("nextcloud_talk_app_password").map_err(|err| {
-                NextcloudTalkBuildError::InvalidConfig {
-                    field: "nextcloud_talk_app_password",
-                    reason: err.to_string(),
-                }
+        let app_password_handle = EgressCredentialHandle::new("nextcloud_talk_app_password")
+            .map_err(|err| NextcloudTalkBuildError::InvalidConfig {
+                field: "nextcloud_talk_app_password",
+                reason: err.to_string(),
             })?;
         let credential_provider = Arc::new(RuntimeCredentialNextcloudEgressProvider::new(
             Arc::clone(&runtime_credential_accounts),
@@ -268,7 +270,11 @@ struct NextcloudTalkRouteState {
     user_id: UserId,
     /// Outbound delivery driver: (driver, nextcloud_host, credential_handle).
     /// `None` when no Nextcloud host is configured (inbound-only mode).
-    delivery_driver: Option<(Arc<NextcloudTalkFinalReplyDriver>, DeclaredEgressHost, EgressCredentialHandle)>,
+    delivery_driver: Option<(
+        Arc<NextcloudTalkFinalReplyDriver>,
+        DeclaredEgressHost,
+        EgressCredentialHandle,
+    )>,
 }
 
 enum NextcloudSecretResolutionError {
@@ -477,25 +483,24 @@ async fn nextcloud_talk_handler(
         Ok(ack) => {
             // If a delivery driver is wired and the turn was accepted, spawn
             // an async task to poll for completion and post the reply back.
-            if let Some((driver, nextcloud_host, app_password_handle)) = &state.delivery_driver {
-                if let ironclaw_product_adapters::ProductInboundAck::Accepted {
+            if let Some((driver, nextcloud_host, app_password_handle)) = &state.delivery_driver
+                && let ironclaw_product_adapters::ProductInboundAck::Accepted {
                     submitted_run_id,
                     ..
                 } = ack
-                {
-                    let driver = Arc::clone(driver);
-                    driver.spawn_delivery(
-                        envelope.adapter_id().clone(),
-                        envelope.installation_id().clone(),
-                        envelope.external_actor_ref().clone(),
-                        envelope.external_conversation_ref().clone(),
-                        envelope.external_event_id().clone(),
-                        envelope.auth_claim().clone(),
-                        submitted_run_id,
-                        app_password_handle.clone(),
-                        nextcloud_host.clone(),
-                    );
-                }
+            {
+                let driver = Arc::clone(driver);
+                driver.spawn_delivery(NextcloudDeliveryTask {
+                    adapter_id: envelope.adapter_id().clone(),
+                    installation_id: envelope.installation_id().clone(),
+                    external_actor_ref: envelope.external_actor_ref().clone(),
+                    external_conversation_ref: envelope.external_conversation_ref().clone(),
+                    external_event_id: envelope.external_event_id().clone(),
+                    auth_claim: envelope.auth_claim().clone(),
+                    run_id: submitted_run_id,
+                    app_password_handle: app_password_handle.clone(),
+                    nextcloud_host: nextcloud_host.clone(),
+                });
             }
             (StatusCode::OK, "ok").into_response()
         }
@@ -551,8 +556,7 @@ async fn resolve_nextcloud_webhook_secret(
             | AuthProductError::AccountSelectionRequired => NextcloudSecretResolutionError::Missing,
             _ => NextcloudSecretResolutionError::Backend,
         })?;
-    let handle = account
-        .access_secret;
+    let handle = account.access_secret;
     let Some(handle) = handle else {
         return Ok(None);
     };
@@ -655,23 +659,32 @@ fn parse_talk_event(
         .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
 
     let payload = ProductInboundPayload::UserMessage(
-        UserMessagePayload::new(text, vec![], ProductTriggerReason::BotMention)
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+        UserMessagePayload::new(text, vec![], ProductTriggerReason::BotMention).map_err(
+            |error| ProductWorkflowError::InvalidBindingRequest {
                 reason: error.to_string(),
-            })?,
+            },
+        )?,
     );
     let parsed = ParsedProductInbound::new(
-        ExternalEventId::new(event_id).map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+        ExternalEventId::new(event_id).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        })?,
+        ExternalActorRef::new("nextcloud_user", actor_id, actor_name).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        })?,
+        ExternalConversationRef::new(
+            None::<&str>,
+            room_token,
+            None::<&str>,
+            message_id.as_deref(),
+        )
+        .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
             reason: error.to_string(),
         })?,
-        ExternalActorRef::new("nextcloud_user", actor_id, actor_name)
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-                reason: error.to_string(),
-            })?,
-        ExternalConversationRef::new(None::<&str>, room_token, None::<&str>, message_id.as_deref())
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-                reason: error.to_string(),
-            })?,
         payload,
     )
     .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
@@ -793,18 +806,32 @@ mod tests {
         let random = "nextcloud-random-abc123";
         let body = br#"{"type":"Create","object":{"content":"hello"}}"#;
 
-        assert!(!verify_nextcloud_signature(secret, random, body, "not-a-valid-signature"));
+        assert!(!verify_nextcloud_signature(
+            secret,
+            random,
+            body,
+            "not-a-valid-signature"
+        ));
     }
 
     #[test]
     fn exact_mention_requires_at_prefix() {
-        assert!(!is_exact_mention_for_bot("ironclaw please help", "ironclaw"));
-        assert!(is_exact_mention_for_bot("@ironclaw please help", "ironclaw"));
+        assert!(!is_exact_mention_for_bot(
+            "ironclaw please help",
+            "ironclaw"
+        ));
+        assert!(is_exact_mention_for_bot(
+            "@ironclaw please help",
+            "ironclaw"
+        ));
     }
 
     #[test]
     fn strip_mention_only_removes_explicit_token() {
         assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
-        assert_eq!(strip_mention("ironclaw hello", "ironclaw"), "ironclaw hello");
+        assert_eq!(
+            strip_mention("ironclaw hello", "ironclaw"),
+            "ironclaw hello"
+        );
     }
 }

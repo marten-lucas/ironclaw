@@ -28,7 +28,8 @@ impl UserDirectory for TestUserDirectory {
         _provider: &OAuthProviderName,
         _profile: &OAuthUserProfile,
     ) -> Result<UserId, UserDirectoryError> {
-        UserId::new("marten@example.com").map_err(|err| UserDirectoryError::Backend(err.to_string()))
+        UserId::new("marten@example.com")
+            .map_err(|err| UserDirectoryError::Backend(err.to_string()))
     }
 }
 

@@ -320,11 +320,7 @@ async fn non_default_model_is_not_rejected_by_validation() {
         .await
         .expect("POST /api/v1/responses with non-default model");
 
-    assert_ne!(
-        resp.status(),
-        404,
-        "route must exist and reach handler"
-    );
+    assert_ne!(resp.status(), 404, "route must exist and reach handler");
 
     let body = resp.text().await.unwrap_or_default();
     assert!(

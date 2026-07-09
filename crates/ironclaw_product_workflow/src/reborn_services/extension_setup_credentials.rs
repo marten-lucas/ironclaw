@@ -10,8 +10,7 @@ use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleProductPayload, LifecycleProductResponse, RebornExtensionCredentialSetup,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornServicesError,
-    WebUiInboundValidationCode,
-    WebUiSetupExtensionRequest,
+    WebUiInboundValidationCode, WebUiSetupExtensionRequest,
 };
 
 use super::{
@@ -156,7 +155,13 @@ pub(super) async fn submit_manual_tokens(
         } else {
             submit.secrets.get(&requirement.name)
         };
-        submit_manual_token_requirement(service, scope.clone(), extension_id, requirement, raw_value)
+        submit_manual_token_requirement(
+            service,
+            scope.clone(),
+            extension_id,
+            requirement,
+            raw_value,
+        )
         .await?;
     }
     Ok(())

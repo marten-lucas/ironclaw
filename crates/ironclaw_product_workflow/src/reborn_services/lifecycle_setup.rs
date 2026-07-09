@@ -16,8 +16,7 @@ use crate::{
 
 use super::{
     ExtensionCredentialSetupService, ExtensionCredentialStoredValueRequest,
-    extension_credentials::credential_scope, extension_onboarding,
-    extension_setup_credentials,
+    extension_credentials::credential_scope, extension_onboarding, extension_setup_credentials,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -76,8 +75,8 @@ pub(super) async fn setup_extension(
 }
 
 pub(super) async fn test_extension_connection(
-extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-caller: WebUiAuthenticatedCaller,
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    caller: WebUiAuthenticatedCaller,
     package_ref: LifecyclePackageRef,
     request: WebUiTestExtensionConnectionRequest,
 ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
@@ -87,8 +86,8 @@ caller: WebUiAuthenticatedCaller,
         ));
     }
 
-    let extension_id =
-        ExtensionId::new(package_ref.id.as_str()).map_err(|_| RebornServicesError::internal_invariant())?;
+    let extension_id = ExtensionId::new(package_ref.id.as_str())
+        .map_err(|_| RebornServicesError::internal_invariant())?;
     let scope = credential_scope(&caller, &package_ref);
 
     let base_url = match test_connection_value_with_fallback(
@@ -548,7 +547,9 @@ mod tests {
             "https://cloud.request.example".to_string(),
         )]);
         let service = StoredValueService {
-            value: Some(SecretString::from("https://cloud.saved.example".to_string())),
+            value: Some(SecretString::from(
+                "https://cloud.saved.example".to_string(),
+            )),
         };
 
         let value = test_connection_value_with_fallback(
@@ -567,12 +568,12 @@ mod tests {
     #[tokio::test]
     async fn test_connection_value_uses_stored_value_when_request_is_blank() {
         let mut request = WebUiTestExtensionConnectionRequest::default();
-        request.fields = BTreeMap::from([(
-            "nextcloud_talk_base_url".to_string(),
-            "   ".to_string(),
-        )]);
+        request.fields =
+            BTreeMap::from([("nextcloud_talk_base_url".to_string(), "   ".to_string())]);
         let service = StoredValueService {
-            value: Some(SecretString::from(" https://cloud.saved.example ".to_string())),
+            value: Some(SecretString::from(
+                " https://cloud.saved.example ".to_string(),
+            )),
         };
 
         let value = test_connection_value_with_fallback(

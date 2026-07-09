@@ -363,9 +363,7 @@ async fn login_handler(
     headers: HeaderMap,
 ) -> Response {
     let redirect_after = sanitize_redirect(params.redirect_after);
-    if raw_provider == YUNOHOST_PROVIDER
-        && state.yunohost_enabled()
-    {
+    if raw_provider == YUNOHOST_PROVIDER && state.yunohost_enabled() {
         return yunohost_login_handler(state, redirect_after, &headers).await;
     }
 
@@ -426,8 +424,8 @@ fn yunohost_profile_from_trusted_headers(headers: &HeaderMap) -> Option<OAuthUse
     // authenticated the request on the same host perimeter.
     let user = header_value_trimmed(headers, YUNOHOST_USER_HEADER)?;
     let email = header_value_trimmed(headers, YUNOHOST_EMAIL_HEADER);
-    let display_name = header_value_trimmed(headers, YUNOHOST_FULLNAME_HEADER)
-        .or_else(|| Some(user.to_string()));
+    let display_name =
+        header_value_trimmed(headers, YUNOHOST_FULLNAME_HEADER).or_else(|| Some(user.to_string()));
     let verified_emails = email.clone().into_iter().collect();
 
     Some(OAuthUserProfile {
@@ -526,7 +524,13 @@ async fn callback_handler(
         }
     };
 
-    issue_session_redirect(&state, &provider_name, profile, flow.redirect_after.as_deref()).await
+    issue_session_redirect(
+        &state,
+        &provider_name,
+        profile,
+        flow.redirect_after.as_deref(),
+    )
+    .await
 }
 
 async fn issue_session_redirect(
@@ -535,11 +539,7 @@ async fn issue_session_redirect(
     profile: OAuthUserProfile,
     redirect_after: Option<&str>,
 ) -> Response {
-    let user_id = match state
-        .user_directory
-        .resolve(provider_name, &profile)
-        .await
-    {
+    let user_id = match state.user_directory.resolve(provider_name, &profile).await {
         Ok(uid) => uid,
         Err(UserDirectoryError::Unknown) => {
             tracing::debug!(

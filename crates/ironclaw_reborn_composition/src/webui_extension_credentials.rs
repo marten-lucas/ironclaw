@@ -9,9 +9,9 @@ use ironclaw_auth::{
 use ironclaw_host_api::RuntimeCredentialAccountSetup;
 use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialStoredValueRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind,
+    ExtensionCredentialStoredValueRequest, ExtensionCredentialSubmitRequest,
+    LifecycleExtensionCredentialSetup, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind,
 };
 use ironclaw_secrets::{SecretStore, SecretStoreError};
 
@@ -128,11 +128,8 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
         let account = selector
             .select_unique_configured_runtime_account(
                 RuntimeCredentialAccountSelectionRequest::new(
-                    CredentialAccountSelectionRequest::new(
-                        request.scope.clone(),
-                        request.provider,
-                    )
-                    .for_extension(request.requester_extension),
+                    CredentialAccountSelectionRequest::new(request.scope.clone(), request.provider)
+                        .for_extension(request.requester_extension),
                     request.scope.clone(),
                     RuntimeCredentialAccountSetup::ManualToken,
                     Vec::new(),
@@ -173,14 +170,13 @@ fn map_secret_store_lease_error(
 ) -> Result<Option<secrecy::SecretString>, RebornServicesError> {
     match error {
         SecretStoreError::UnknownSecret { .. } | SecretStoreError::SecretExpired => Ok(None),
-        SecretStoreError::StoreUnavailable { .. } | SecretStoreError::BackendMisconfigured { .. } => {
-            Err(services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            ))
-        }
+        SecretStoreError::StoreUnavailable { .. }
+        | SecretStoreError::BackendMisconfigured { .. } => Err(services_error(
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        )),
         _ => Err(services_error(
             RebornServicesErrorCode::Internal,
             RebornServicesErrorKind::Internal,
@@ -200,14 +196,13 @@ fn map_secret_store_consume_error(
         | SecretStoreError::LeaseExpired { .. }
         | SecretStoreError::UnknownSecret { .. }
         | SecretStoreError::SecretExpired => Ok(None),
-        SecretStoreError::StoreUnavailable { .. } | SecretStoreError::BackendMisconfigured { .. } => {
-            Err(services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::ServiceUnavailable,
-                503,
-                true,
-            ))
-        }
+        SecretStoreError::StoreUnavailable { .. }
+        | SecretStoreError::BackendMisconfigured { .. } => Err(services_error(
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        )),
     }
 }
 

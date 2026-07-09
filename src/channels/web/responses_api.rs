@@ -397,9 +397,7 @@ fn resolve_response_timeout(timeout_sec: Option<u64>) -> Option<Duration> {
     match timeout_sec {
         None => Some(RESPONSE_TIMEOUT),
         Some(0) => None,
-        Some(secs) => Some(Duration::from_secs(
-            secs.min(MAX_RESPONSE_TIMEOUT_SECS),
-        )),
+        Some(secs) => Some(Duration::from_secs(secs.min(MAX_RESPONSE_TIMEOUT_SECS))),
     }
 }
 
@@ -880,8 +878,14 @@ fn retarget_message_for_fresh_thread(
             + 1;
 
         obj.insert("thread_id".to_string(), serde_json::json!(thread_id));
-        obj.insert("responses_request_id".to_string(), serde_json::json!(request_id));
-        obj.insert("responses_response_id".to_string(), serde_json::json!(response_id));
+        obj.insert(
+            "responses_request_id".to_string(),
+            serde_json::json!(request_id),
+        );
+        obj.insert(
+            "responses_response_id".to_string(),
+            serde_json::json!(response_id),
+        );
         obj.insert(
             "responses_retry_attempt".to_string(),
             serde_json::json!(retry_attempt),
@@ -948,11 +952,7 @@ async fn persist_conversation_title_if_present(
         .is_ok()
     {
         let _ = store
-            .update_conversation_metadata_field(
-                thread_uuid,
-                "title",
-                &serde_json::json!(title),
-            )
+            .update_conversation_metadata_field(thread_uuid, "title", &serde_json::json!(title))
             .await;
     }
 }
@@ -1431,9 +1431,7 @@ pub async fn create_response_handler(
     {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            format!(
-                "The 'num_ctx' field must be an integer in [1, {MAX_NUM_CTX}]"
-            ),
+            format!("The 'num_ctx' field must be an integer in [1, {MAX_NUM_CTX}]"),
             "invalid_request_error",
         ));
     }
@@ -1855,12 +1853,8 @@ async fn handle_non_streaming_with_fresh_thread_fallback(
     let retry_response_uuid = Uuid::new_v4();
     let retry_request_id = retry_response_uuid.to_string();
     let retry_resp_id = encode_response_id(&retry_response_uuid, &retry_thread_uuid);
-    let retry_msg = retarget_message_for_fresh_thread(
-        msg,
-        &retry_thread_id,
-        &retry_request_id,
-        &retry_resp_id,
-    );
+    let retry_msg =
+        retarget_message_for_fresh_thread(msg, &retry_thread_id, &retry_request_id, &retry_resp_id);
 
     tracing::info!(
         thread_id = %retry_thread_id,
@@ -3357,7 +3351,8 @@ mod tests {
 
     #[test]
     fn accumulator_uses_turn_metrics_model_as_effective_response_model() {
-        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "requested-model".to_string());
+        let mut acc =
+            ResponseAccumulator::new("resp_test".to_string(), "requested-model".to_string());
         let done = acc.process(AppEvent::TurnMetrics {
             thread_id: Some("t".to_string()),
             input_tokens: 5,
@@ -3414,17 +3409,34 @@ mod tests {
             }),
         );
 
-        let retargeted = retarget_message_for_fresh_thread(
-            msg,
-            "new-thread",
-            "req-new",
-            "resp-new",
-        );
+        let retargeted =
+            retarget_message_for_fresh_thread(msg, "new-thread", "req-new", "resp-new");
 
-        assert_eq!(retargeted.thread_id.as_ref().map(|t| t.as_str()), Some("new-thread"));
-        assert_eq!(retargeted.metadata.get("thread_id").and_then(|v| v.as_str()), Some("new-thread"));
-        assert_eq!(retargeted.metadata.get("responses_request_id").and_then(|v| v.as_str()), Some("req-new"));
-        assert_eq!(retargeted.metadata.get("responses_response_id").and_then(|v| v.as_str()), Some("resp-new"));
+        assert_eq!(
+            retargeted.thread_id.as_ref().map(|t| t.as_str()),
+            Some("new-thread")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("thread_id")
+                .and_then(|v| v.as_str()),
+            Some("new-thread")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_request_id")
+                .and_then(|v| v.as_str()),
+            Some("req-new")
+        );
+        assert_eq!(
+            retargeted
+                .metadata
+                .get("responses_response_id")
+                .and_then(|v| v.as_str()),
+            Some("resp-new")
+        );
         assert_eq!(
             retargeted
                 .metadata

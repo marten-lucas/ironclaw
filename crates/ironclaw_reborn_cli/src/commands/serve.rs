@@ -180,7 +180,9 @@ impl ServeCommand {
         )?;
         let nextcloud_talk_config =
             crate::commands::serve_nextcloud::resolve_nextcloud_talk_config_for_serve(
-                config_file.as_ref().and_then(|file| file.nextcloud_talk.as_ref()),
+                config_file
+                    .as_ref()
+                    .and_then(|file| file.nextcloud_talk.as_ref()),
                 &tenant_id,
                 &default_agent_id,
                 default_project_id.as_ref(),
@@ -466,8 +468,9 @@ impl ServeCommand {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
             if let Some(nextcloud_talk_config) = nextcloud_talk_config {
-                let nextcloud_mount = build_nextcloud_talk_route_mount(&runtime, nextcloud_talk_config)
-                    .context("failed to compose Nextcloud Talk webhook route")?;
+                let nextcloud_mount =
+                    build_nextcloud_talk_route_mount(&runtime, nextcloud_talk_config)
+                        .context("failed to compose Nextcloud Talk webhook route")?;
                 serve_config = serve_config.with_public_route_mount(nextcloud_mount);
             }
             if let Some(google_oauth) = resolve_google_oauth_config_from_env()

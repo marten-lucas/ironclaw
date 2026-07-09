@@ -379,9 +379,9 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
-        fn runtime_status_service() -> Arc<dyn ExtensionRuntimeStatusService> {
-            Arc::new(super::super::StaticExtensionRuntimeStatusService::default())
-        }
+    fn runtime_status_service() -> Arc<dyn ExtensionRuntimeStatusService> {
+        Arc::new(super::super::StaticExtensionRuntimeStatusService::default())
+    }
 
     use crate::{
         ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
@@ -455,8 +455,8 @@ mod tests {
             runtime_status_service(),
             caller.clone(),
         )
-            .await
-            .expect("list extensions");
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(extension.active, "lifecycle activation remains visible");
@@ -497,8 +497,8 @@ mod tests {
             runtime_status_service(),
             caller(),
         )
-            .await
-            .expect("list extensions");
+        .await
+        .expect("list extensions");
         let extension = response.extensions.first().expect("one extension");
 
         assert!(extension.active);
@@ -529,8 +529,8 @@ mod tests {
             runtime_status_service(),
             caller(),
         )
-            .await
-            .expect("list extensions");
+        .await
+        .expect("list extensions");
 
         assert_eq!(
             response.extensions.len(),

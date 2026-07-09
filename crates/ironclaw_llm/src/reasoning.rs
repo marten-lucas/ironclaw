@@ -1,7 +1,7 @@
 //! LLM reasoning capabilities for planning, tool selection, and evaluation.
 
-use std::sync::{Arc, LazyLock};
 use std::collections::HashSet;
+use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1351,7 +1351,7 @@ fn compute_content_fingerprint(content: &str) -> u64 {
         .filter(|l| !l.trim().is_empty() && l.len() > 5) // Skip trivial lines
         .map(|l| l.trim())
         .collect();
-    
+
     let normalized = lines.join("|");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     use std::hash::{Hash, Hasher};
@@ -1366,27 +1366,27 @@ fn is_semantic_duplicate(content: &str, existing_sections: &[(String, &str)]) ->
         .filter(|l| !l.trim().is_empty() && l.len() > 5)
         .map(|l| l.trim())
         .collect();
-    
+
     if content_lines.is_empty() {
         return true; // Empty content is trivial duplicate
     }
-    
+
     for (_, existing) in existing_sections {
         let existing_lines: HashSet<&str> = existing
             .lines()
             .filter(|l| !l.trim().is_empty() && l.len() > 5)
             .map(|l| l.trim())
             .collect();
-        
+
         if existing_lines.is_empty() {
             continue;
         }
-        
+
         // Calculate Jaccard similarity
         let intersection = content_lines.intersection(&existing_lines).count();
         let union_size = content_lines.len() + existing_lines.len() - intersection;
         let similarity = intersection as f32 / union_size as f32;
-        
+
         if similarity > 0.7 {
             return true; // >70% overlap = semantic duplicate
         }
@@ -1419,52 +1419,58 @@ fn infer_section_label(content: &str) -> &'static str {
 /// Merge the reasoning method's system prompt with any system messages already
 /// present in the conversation context. Uses semantic deduplication to reduce
 /// redundancy and organizes sections for clarity.
-/// 
+///
 /// Strict LLM providers (e.g. Qwen) reject conversations with system messages
 /// that are not at the very beginning, so we concatenate all system content
 /// into a single prompt with clear section separation.
 fn merge_system_messages(primary: String, context_messages: &[ChatMessage]) -> String {
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut seen_fingerprints: HashSet<u64> = HashSet::new();
-    
+
     // Add primary section (Core Instructions)
     let primary_fp = compute_content_fingerprint(&primary);
     seen_fingerprints.insert(primary_fp);
     sections.push(("Core Instructions".to_string(), primary));
-    
+
     // Collect and deduplicate system messages from context
     for msg in context_messages {
         if msg.role == Role::System {
             let content = msg.content.as_str();
-            
+
             // Skip trivial messages
             if content.trim().is_empty() || content.len() < 10 {
                 continue;
             }
-            
+
             // Skip exact duplicates (fingerprint match)
             let fp = compute_content_fingerprint(content);
             if seen_fingerprints.contains(&fp) {
                 continue;
             }
-            
+
             // Skip semantic duplicates
-            if is_semantic_duplicate(content, &sections.iter().map(|(k, v)| (k.clone(), v.as_str())).collect::<Vec<_>>()) {
+            if is_semantic_duplicate(
+                content,
+                &sections
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.as_str()))
+                    .collect::<Vec<_>>(),
+            ) {
                 continue;
             }
-            
+
             // Add as new section with inferred label
             let label = infer_section_label(content).to_string();
             seen_fingerprints.insert(fp);
             sections.push((label, msg.content.clone()));
         }
     }
-    
+
     // If only primary, return as-is
     if sections.len() == 1 {
         return sections.into_iter().next().unwrap().1;
     }
-    
+
     // Format with clear section separation
     sections
         .into_iter()

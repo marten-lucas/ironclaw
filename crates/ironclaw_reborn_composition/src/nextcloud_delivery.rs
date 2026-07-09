@@ -57,6 +57,19 @@ pub(crate) struct NextcloudTalkFinalReplyDriver {
     max_wait: Duration,
 }
 
+#[derive(Clone)]
+pub(crate) struct NextcloudDeliveryTask {
+    pub(crate) adapter_id: ironclaw_product_adapters::ProductAdapterId,
+    pub(crate) installation_id: ironclaw_product_adapters::AdapterInstallationId,
+    pub(crate) external_actor_ref: ironclaw_product_adapters::ExternalActorRef,
+    pub(crate) external_conversation_ref: ironclaw_product_adapters::ExternalConversationRef,
+    pub(crate) external_event_id: ironclaw_product_adapters::ExternalEventId,
+    pub(crate) auth_claim: ironclaw_product_adapters::VerifiedAuthClaim,
+    pub(crate) run_id: TurnRunId,
+    pub(crate) app_password_handle: EgressCredentialHandle,
+    pub(crate) nextcloud_host: DeclaredEgressHost,
+}
+
 impl NextcloudTalkFinalReplyDriver {
     pub(crate) fn new(
         turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -77,33 +90,10 @@ impl NextcloudTalkFinalReplyDriver {
     /// Spawn an async delivery task that waits for the given run to reach a
     /// terminal state and then POSTs the reply to Nextcloud. Returns
     /// immediately; the task runs in the background.
-    pub(crate) fn spawn_delivery(
-        self: Arc<Self>,
-        adapter_id: ironclaw_product_adapters::ProductAdapterId,
-        installation_id: ironclaw_product_adapters::AdapterInstallationId,
-        external_actor_ref: ironclaw_product_adapters::ExternalActorRef,
-        external_conversation_ref: ironclaw_product_adapters::ExternalConversationRef,
-        external_event_id: ironclaw_product_adapters::ExternalEventId,
-        auth_claim: ironclaw_product_adapters::VerifiedAuthClaim,
-        run_id: TurnRunId,
-        app_password_handle: EgressCredentialHandle,
-        nextcloud_host: DeclaredEgressHost,
-    ) {
+    pub(crate) fn spawn_delivery(self: Arc<Self>, task: NextcloudDeliveryTask) {
         tokio::spawn(async move {
-            if let Err(error) = self
-                .deliver_run(
-                    adapter_id,
-                    installation_id,
-                    external_actor_ref,
-                    external_conversation_ref,
-                    external_event_id,
-                    auth_claim,
-                    run_id,
-                    app_password_handle,
-                    nextcloud_host,
-                )
-                .await
-            {
+            let run_id = task.run_id;
+            if let Err(error) = self.deliver_run(task).await {
                 tracing::warn!(
                     target = "ironclaw::reborn::nextcloud_delivery",
                     error = %error,
@@ -114,18 +104,19 @@ impl NextcloudTalkFinalReplyDriver {
         });
     }
 
-    async fn deliver_run(
-        &self,
-        adapter_id: ironclaw_product_adapters::ProductAdapterId,
-        installation_id: ironclaw_product_adapters::AdapterInstallationId,
-        external_actor_ref: ironclaw_product_adapters::ExternalActorRef,
-        external_conversation_ref: ironclaw_product_adapters::ExternalConversationRef,
-        external_event_id: ironclaw_product_adapters::ExternalEventId,
-        auth_claim: ironclaw_product_adapters::VerifiedAuthClaim,
-        run_id: TurnRunId,
-        app_password_handle: EgressCredentialHandle,
-        nextcloud_host: DeclaredEgressHost,
-    ) -> Result<(), NextcloudDeliveryError> {
+    async fn deliver_run(&self, task: NextcloudDeliveryTask) -> Result<(), NextcloudDeliveryError> {
+        let NextcloudDeliveryTask {
+            adapter_id,
+            installation_id,
+            external_actor_ref,
+            external_conversation_ref,
+            external_event_id,
+            auth_claim,
+            run_id,
+            app_password_handle,
+            nextcloud_host,
+        } = task;
+
         // Resolve the conversation binding to get the thread_id and TurnScope.
         let binding = self
             .binding_service
@@ -193,9 +184,7 @@ impl NextcloudTalkFinalReplyDriver {
         };
 
         // Build the POST request to Nextcloud's chat API.
-        let room_token = external_conversation_ref
-            .conversation_id()
-            .to_string();
+        let room_token = external_conversation_ref.conversation_id().to_string();
         let reply_to = reply_to_message_id(&external_conversation_ref);
 
         let body_value = serde_json::json!({ "message": text, "replyTo": reply_to });
@@ -344,8 +333,8 @@ impl RuntimeCredentialNextcloudEgressProvider {
         &self,
         provider_id: &str,
     ) -> Result<String, NextcloudEgressCredentialError> {
-        let provider =
-            AuthProviderId::new(provider_id).map_err(|_| NextcloudEgressCredentialError::Unavailable)?;
+        let provider = AuthProviderId::new(provider_id)
+            .map_err(|_| NextcloudEgressCredentialError::Unavailable)?;
         let scope = AuthProductScope::new(
             ResourceScope {
                 tenant_id: self.tenant_id.clone(),
@@ -379,11 +368,12 @@ impl RuntimeCredentialNextcloudEgressProvider {
                 }
                 _ => NextcloudEgressCredentialError::Unavailable,
             })?;
-        let handle = account
-            .access_secret
-            .ok_or(NextcloudEgressCredentialError::UnknownHandle {
-                handle: provider_id.to_string(),
-            })?;
+        let handle =
+            account
+                .access_secret
+                .ok_or(NextcloudEgressCredentialError::UnknownHandle {
+                    handle: provider_id.to_string(),
+                })?;
         let lease = self
             .secret_store
             .lease_once(&account.scope.resource, &handle)
@@ -415,21 +405,18 @@ mod tests {
 
     #[test]
     fn reply_to_falls_back_to_zero_without_message_id() {
-        let conversation = ExternalConversationRef::new(None::<&str>, "room-alpha", None::<&str>, None)
-            .expect("conversation ref");
+        let conversation =
+            ExternalConversationRef::new(None::<&str>, "room-alpha", None::<&str>, None)
+                .expect("conversation ref");
 
         assert_eq!(reply_to_message_id(&conversation), 0);
     }
 
     #[test]
     fn reply_to_uses_parseable_message_id() {
-        let conversation = ExternalConversationRef::new(
-            None::<&str>,
-            "room-alpha",
-            None::<&str>,
-            Some("42"),
-        )
-        .expect("conversation ref");
+        let conversation =
+            ExternalConversationRef::new(None::<&str>, "room-alpha", None::<&str>, Some("42"))
+                .expect("conversation ref");
 
         assert_eq!(reply_to_message_id(&conversation), 42);
     }
@@ -448,6 +435,9 @@ impl NextcloudEgressCredentialProvider for RuntimeCredentialNextcloudEgressProvi
         }
         let username = self.resolve_secret("nextcloud_talk_bot_username").await?;
         let app_password = self.resolve_secret("nextcloud_talk_app_password").await?;
-        Ok(NextcloudEgressCredential::basic_auth(username, app_password))
+        Ok(NextcloudEgressCredential::basic_auth(
+            username,
+            app_password,
+        ))
     }
 }

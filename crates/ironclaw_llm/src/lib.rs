@@ -84,11 +84,10 @@ pub use provider::{
     ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
-    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
-    ThinkingModeOverride, TokenUsage, ToolSelection, is_silent_reply,
-    llm_signals_tool_intent,
-    OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY,
+    ActionPlan, OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY, Reasoning,
+    ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly, ResponseMetadata,
+    SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE, ThinkingModeOverride,
+    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
     user_signals_execution_intent,
 };
 pub use reasoning::{
@@ -114,9 +113,9 @@ pub use session::{NearWalletSignedMessage, SessionConfig, SessionManager, create
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
 
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "registry-provider-factory")]
 use std::path::Path;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
@@ -955,7 +954,11 @@ struct ModelRoutingProvider {
 }
 
 impl ModelRoutingProvider {
-    fn new(default_provider: Arc<dyn LlmProvider>, config: LlmConfig, session: Arc<SessionManager>) -> Self {
+    fn new(
+        default_provider: Arc<dyn LlmProvider>,
+        config: LlmConfig,
+        session: Arc<SessionManager>,
+    ) -> Self {
         Self {
             default_provider,
             config,
@@ -971,7 +974,10 @@ impl ModelRoutingProvider {
             != requested_model
     }
 
-    async fn provider_for_model(&self, requested_model: &str) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    async fn provider_for_model(
+        &self,
+        requested_model: &str,
+    ) -> Result<Arc<dyn LlmProvider>, LlmError> {
         if let Some(existing) = self
             .providers_by_model
             .read()
@@ -1028,10 +1034,13 @@ fn with_requested_model(config: &LlmConfig, requested_model: &str) -> Result<Llm
             routed.nearai.model = requested_model;
         }
         LlmBackendKind::Bedrock => {
-            let bedrock = routed.bedrock.as_mut().ok_or_else(|| LlmError::RequestFailed {
-                provider: "bedrock".to_string(),
-                reason: "Bedrock backend selected but bedrock config is missing".to_string(),
-            })?;
+            let bedrock = routed
+                .bedrock
+                .as_mut()
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: "bedrock".to_string(),
+                    reason: "Bedrock backend selected but bedrock config is missing".to_string(),
+                })?;
             bedrock.model = requested_model;
         }
         LlmBackendKind::GeminiOauth => {
@@ -1046,15 +1055,14 @@ fn with_requested_model(config: &LlmConfig, requested_model: &str) -> Result<Llm
             gemini.model = requested_model;
         }
         LlmBackendKind::OpenAiCodex => {
-            let codex =
-                routed
-                    .openai_codex
-                    .as_mut()
-                    .ok_or_else(|| LlmError::RequestFailed {
-                        provider: "openai_codex".to_string(),
-                        reason: "OpenAI Codex backend selected but openai_codex config is missing"
-                            .to_string(),
-                    })?;
+            let codex = routed
+                .openai_codex
+                .as_mut()
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: "openai_codex".to_string(),
+                    reason: "OpenAI Codex backend selected but openai_codex config is missing"
+                        .to_string(),
+                })?;
             codex.model = requested_model;
         }
         LlmBackendKind::Registry(_) => {
@@ -1083,7 +1091,10 @@ impl LlmProvider for ModelRoutingProvider {
         self.default_provider.cost_per_token()
     }
 
-    async fn complete(&self, mut request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
         if let Some(requested_model) = normalized_model_override(request.model.as_deref())
             && self.requires_model_bound_routing(requested_model)
         {

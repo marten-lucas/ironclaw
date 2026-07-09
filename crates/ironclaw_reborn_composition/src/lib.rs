@@ -69,17 +69,17 @@ mod mount_filesystem_reader;
 #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
 mod nearai_login_serve;
 mod nearai_mcp;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_delivery;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_egress;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_talk_serve;
 mod notion_oauth;
 mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
-#[cfg(feature = "webui-v2-beta")]
-mod nextcloud_egress;
-#[cfg(feature = "webui-v2-beta")]
-mod nextcloud_delivery;
-#[cfg(feature = "webui-v2-beta")]
-mod nextcloud_talk_serve;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
 mod operator_logs;
@@ -225,8 +225,6 @@ pub use local_runtime_profile::{
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
-#[cfg(feature = "openai-compat-beta")]
-pub use openai_compat_serve::build_openai_compat_route_mount;
 #[cfg(feature = "webui-v2-beta")]
 pub use nextcloud_egress::{
     NextcloudEgressCredential, NextcloudEgressCredentialError, NextcloudEgressCredentialProvider,
@@ -236,6 +234,8 @@ pub use nextcloud_egress::{
 pub use nextcloud_talk_serve::{
     NextcloudTalkBuildError, NextcloudTalkRouteConfig, build_nextcloud_talk_route_mount,
 };
+#[cfg(feature = "openai-compat-beta")]
+pub use openai_compat_serve::build_openai_compat_route_mount;
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,

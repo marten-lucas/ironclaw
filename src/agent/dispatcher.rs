@@ -741,13 +741,13 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 reason_ctx.temperature = Some(t);
             }
 
-            if let Some(num_ctx) = resolve_num_ctx_override(reason_ctx.num_ctx, &self.message.metadata)
+            if let Some(num_ctx) =
+                resolve_num_ctx_override(reason_ctx.num_ctx, &self.message.metadata)
             {
                 reason_ctx.num_ctx = Some(num_ctx);
-                reason_ctx.metadata.insert(
-                    OLLAMA_NUM_CTX_METADATA_KEY.to_string(),
-                    num_ctx.to_string(),
-                );
+                reason_ctx
+                    .metadata
+                    .insert(OLLAMA_NUM_CTX_METADATA_KEY.to_string(), num_ctx.to_string());
             }
 
             if let Some(mode) =
@@ -1981,13 +1981,13 @@ mod tests {
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
         persist_selected_auth_prompt, resolve_num_ctx_override, resolve_request_model_override,
-        resolve_settings_temperature, resolve_temperature_overrides, resolve_thinking_mode_override,
-        restore_selected_auth_prompt, selected_model_override,
+        resolve_settings_temperature, resolve_temperature_overrides,
+        resolve_thinking_mode_override, restore_selected_auth_prompt, selected_model_override,
     };
-    use ironclaw_llm::ThinkingModeOverride;
     use crate::agent::session::PendingAuthPrompt;
     use crate::generated_images::GeneratedImageSentinel;
     use ironclaw_common::ExtensionName;
+    use ironclaw_llm::ThinkingModeOverride;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -3584,10 +3584,7 @@ mod tests {
             Some(ThinkingModeOverride::On),
         );
         assert_eq!(
-            resolve_thinking_mode_override(
-                None,
-                &serde_json::json!({ "thinking_mode": " OFF " }),
-            ),
+            resolve_thinking_mode_override(None, &serde_json::json!({ "thinking_mode": " OFF " }),),
             Some(ThinkingModeOverride::Off),
         );
     }
@@ -3607,10 +3604,8 @@ mod tests {
     #[test]
     fn request_model_override_reads_selected_model_from_metadata() {
         assert_eq!(
-            resolve_request_model_override(
-                &serde_json::json!({ "selected_model": "qwen3.6:27b" })
-            )
-            .as_deref(),
+            resolve_request_model_override(&serde_json::json!({ "selected_model": "qwen3.6:27b" }))
+                .as_deref(),
             Some("qwen3.6:27b"),
         );
         assert_eq!(
@@ -3644,10 +3639,7 @@ mod tests {
             resolve_request_model_override(&serde_json::json!({ "num_ctx": 4096 })),
             None,
         );
-        assert_eq!(
-            resolve_request_model_override(&serde_json::json!({})),
-            None,
-        );
+        assert_eq!(resolve_request_model_override(&serde_json::json!({})), None,);
     }
 
     /// LLM provider that always returns calls to a nonexistent tool, regardless

@@ -219,10 +219,7 @@ fn credential_requirements(
         if let Some(seen) = groups.iter_mut().find(|seen| {
             seen.handle == *handle
                 && seen.provider == provider
-                && matches!(
-                    seen.setup,
-                    LifecycleExtensionCredentialSetup::ManualToken
-                )
+                && matches!(seen.setup, LifecycleExtensionCredentialSetup::ManualToken)
         }) {
             seen.required = true;
             continue;
@@ -1493,7 +1490,10 @@ where
         .map_err(map_binding_error)?;
         let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
         let product_adapter_required_credentials =
-            product_adapter_required_credentials_from_manifest_record(&record, entry.name.as_str())?;
+            product_adapter_required_credentials_from_manifest_record(
+                &record,
+                entry.name.as_str(),
+            )?;
         let manifest = record
             .manifest()
             .clone()
@@ -2046,7 +2046,10 @@ mod tests {
         );
         assert_eq!(summary.credential_requirements.len(), 1);
         assert_eq!(summary.credential_requirements[0].name, "slack_bot_token");
-        assert_eq!(summary.credential_requirements[0].provider, "slack_bot_token");
+        assert_eq!(
+            summary.credential_requirements[0].provider,
+            "slack_bot_token"
+        );
         assert!(matches!(
             summary.credential_requirements[0].setup,
             LifecycleExtensionCredentialSetup::ManualToken

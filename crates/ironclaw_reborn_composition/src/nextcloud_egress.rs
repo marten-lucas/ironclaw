@@ -378,8 +378,7 @@ mod tests {
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_product_adapters::{
-        DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle, EgressMethod,
-        EgressPath,
+        DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle, EgressMethod, EgressPath,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
@@ -487,7 +486,10 @@ mod tests {
 
     fn nextcloud_egress_with_network(
         network: RecordingNetworkHttpEgress,
-    ) -> (NextcloudProtocolHttpEgress, Arc<Mutex<Vec<NetworkHttpRequest>>>) {
+    ) -> (
+        NextcloudProtocolHttpEgress,
+        Arc<Mutex<Vec<NetworkHttpRequest>>>,
+    ) {
         let (host_egress, requests) = host_egress_port(network);
         let handle = nextcloud_handle();
         let egress = NextcloudProtocolHttpEgress::new(
@@ -610,27 +612,10 @@ mod tests {
 
     #[tokio::test]
     async fn nextcloud_protocol_http_egress_rejects_adapter_authorization_header() {
-        let (egress, recorded_requests) =
-            nextcloud_egress_with_network(RecordingNetworkHttpEgress::ok());
-        let request = nextcloud_request(nextcloud_handle()).with_header(
-            ironclaw_product_adapters::EgressHeader::new("Authorization", "Basic abc")
-                .expect("header"),
-        );
-
-        let error = egress
-            .send(request)
-            .await
-            .expect_err("adapter-side Authorization header must be rejected");
-
-        assert!(matches!(
-            error,
-            ProtocolHttpEgressError::PolicyDenied { .. }
-        ));
+        let header = ironclaw_product_adapters::EgressHeader::new("Authorization", "Basic abc");
         assert!(
-            recorded_requests
-                .lock()
-                .expect("network requests lock")
-                .is_empty()
+            header.is_err(),
+            "Authorization header must be rejected at adapter request construction"
         );
     }
 

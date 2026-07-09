@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::NextcloudTalkRouteConfig;
+use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_config::NextcloudTalkSection;
 
 const DEFAULT_EXTENSION_ID: &str = "nextcloud-talk";

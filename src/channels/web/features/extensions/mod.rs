@@ -794,20 +794,26 @@ pub(crate) async fn extensions_setup_test_connection_handler(
         ));
     }
 
-    let base_url = nextcloud_setup_value(&req, "nextcloud_talk_base_url")
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Missing nextcloud_talk_base_url".to_string()))?;
-    let bot_username = nextcloud_setup_value(&req, "nextcloud_talk_bot_username").ok_or_else(|| {
+    let base_url = nextcloud_setup_value(&req, "nextcloud_talk_base_url").ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            "Missing nextcloud_talk_bot_username".to_string(),
+            "Missing nextcloud_talk_base_url".to_string(),
         )
     })?;
-    let app_password = nextcloud_setup_value(&req, "nextcloud_talk_app_password").ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Missing nextcloud_talk_app_password".to_string(),
-        )
-    })?;
+    let bot_username =
+        nextcloud_setup_value(&req, "nextcloud_talk_bot_username").ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing nextcloud_talk_bot_username".to_string(),
+            )
+        })?;
+    let app_password =
+        nextcloud_setup_value(&req, "nextcloud_talk_app_password").ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Missing nextcloud_talk_app_password".to_string(),
+            )
+        })?;
 
     validate_operator_base_url(base_url, "nextcloud_talk_base_url")
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -1186,9 +1192,7 @@ mod tests {
             .expect("listener");
         let addr = listener.local_addr().expect("addr");
         let server = tokio::spawn(async move {
-            axum::serve(listener, nextcloud_app)
-                .await
-                .expect("server");
+            axum::serve(listener, nextcloud_app).await.expect("server");
         });
 
         let state = test_gateway_state(None);

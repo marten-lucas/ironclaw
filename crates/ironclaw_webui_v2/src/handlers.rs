@@ -53,8 +53,7 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, WebUiTestExtensionConnectionRequest,
-    webui_attachment_capabilities,
+    WebUiSetupExtensionRequest, WebUiTestExtensionConnectionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 

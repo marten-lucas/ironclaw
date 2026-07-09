@@ -1319,10 +1319,7 @@ mention_regex = "@ironclaw"
             .as_ref()
             .expect("nextcloud_talk section present");
         assert_eq!(nextcloud.enabled, Some(true));
-        assert_eq!(
-            nextcloud.extension_id.as_deref(),
-            Some("nextcloud-talk")
-        );
+        assert_eq!(nextcloud.extension_id.as_deref(), Some("nextcloud-talk"));
         assert_eq!(
             nextcloud.webhook_path.as_deref(),
             Some("/webhooks/nextcloud/talk")

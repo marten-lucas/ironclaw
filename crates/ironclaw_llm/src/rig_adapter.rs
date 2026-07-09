@@ -26,7 +26,6 @@ use std::str::FromStr;
 
 use crate::costs;
 use crate::error::LlmError;
-use crate::{OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -36,6 +35,7 @@ use crate::provider::{
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
+use crate::{OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY};
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
@@ -823,7 +823,10 @@ fn inject_ollama_request_overrides(
         overrides.insert("num_ctx".to_string(), serde_json::json!(num_ctx));
     }
 
-    if let Some(mode) = metadata.get(OLLAMA_THINKING_MODE_METADATA_KEY).map(|value| value.trim()) {
+    if let Some(mode) = metadata
+        .get(OLLAMA_THINKING_MODE_METADATA_KEY)
+        .map(|value| value.trim())
+    {
         match mode {
             "on" => {
                 overrides.insert("think".to_string(), serde_json::json!(true));
@@ -2869,17 +2872,14 @@ mod tests {
 
     #[test]
     fn test_enforce_requested_model_for_rig_provider_accepts_matching_override() {
-        let result =
-            enforce_requested_model_for_rig_provider("qwen3.6:27b", Some("qwen3.6:27b"));
+        let result = enforce_requested_model_for_rig_provider("qwen3.6:27b", Some("qwen3.6:27b"));
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_enforce_requested_model_for_rig_provider_rejects_mismatch() {
-        let result = enforce_requested_model_for_rig_provider(
-            "mistral-nemo:12b",
-            Some("qwen3.6:27b"),
-        );
+        let result =
+            enforce_requested_model_for_rig_provider("mistral-nemo:12b", Some("qwen3.6:27b"));
 
         match result {
             Err(LlmError::RequestFailed { provider, reason }) => {

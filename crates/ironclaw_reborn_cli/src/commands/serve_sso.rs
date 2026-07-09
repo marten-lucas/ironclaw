@@ -48,8 +48,7 @@ pub(crate) struct SsoStartupConfig {
     pub(crate) allowed_email_domains: Vec<String>,
 }
 
-const YUNOHOST_TRUSTED_HEADERS_ENV: &str =
-    "IRONCLAW_REBORN_WEBUI_YUNOHOST_TRUSTED_HEADERS";
+const YUNOHOST_TRUSTED_HEADERS_ENV: &str = "IRONCLAW_REBORN_WEBUI_YUNOHOST_TRUSTED_HEADERS";
 
 /// Resolve the SSO startup config from environment, applying all
 /// startup-time SSO policy in one place: provider discovery, base-URL
@@ -274,9 +273,7 @@ fn yunohost_portal_from_env() -> anyhow::Result<Option<YunoHostPortalConfig>> {
     if parse_enabled_flag(&raw) {
         return Ok(Some(YunoHostPortalConfig));
     }
-    anyhow::bail!(
-        "{YUNOHOST_TRUSTED_HEADERS_ENV} must be one of 1,true,yes,on when set"
-    )
+    anyhow::bail!("{YUNOHOST_TRUSTED_HEADERS_ENV} must be one of 1,true,yes,on when set")
 }
 
 fn parse_enabled_flag(raw: &str) -> bool {
