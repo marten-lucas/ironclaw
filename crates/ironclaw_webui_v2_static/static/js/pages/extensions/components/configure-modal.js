@@ -12,17 +12,29 @@ import { extensionIsActive, setupReadyForActivation } from "../lib/extension-act
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
-  const extensionName = extension?.displayName || extension?.packageRef?.id || "Extension";
+  const extensionPackageRef = extension?.packageRef || extension?.package_ref || null;
+  const extensionPackageId =
+    extensionPackageRef?.id || extension?.id || "";
+  const extensionName = extension?.displayName || extensionPackageId || "Extension";
   const { secrets = [], fields = [], onboarding, isLoading, error } =
-    useExtensionSetup(extension?.packageRef);
+    useExtensionSetup(extensionPackageRef);
   const [values, setValues] = React.useState({});
   const [fieldValues, setFieldValues] = React.useState({});
   const [connectionResult, setConnectionResult] = React.useState(null);
-  const isNextcloudTalk = extension?.packageRef?.id === "nextcloud-talk";
-  const oauthMutation = useOauthSetup(extension?.packageRef);
-  const connectionTestMutation = useExtensionConnectionTest(extension?.packageRef);
+  const hasNextcloudSetupHandles = [...secrets, ...fields].some((item) =>
+    ["nextcloud_talk_base_url", "nextcloud_talk_bot_username", "nextcloud_talk_app_password"].includes(
+      item?.name
+    )
+  );
+  const isNextcloudTalk =
+    extensionPackageId === "nextcloud-talk" ||
+    extensionPackageId === "nextcloud_talk" ||
+    extensionPackageId.toLowerCase().includes("nextcloud") ||
+    hasNextcloudSetupHandles;
+  const oauthMutation = useOauthSetup(extensionPackageRef);
+  const connectionTestMutation = useExtensionConnectionTest(extensionPackageRef);
 
-  const submitMutation = useSetupSubmit(extension?.packageRef, (res) => {
+  const submitMutation = useSetupSubmit(extensionPackageRef, (res) => {
     if (res.success !== false) {
       if (onSaved) onSaved(res);
       onClose();
