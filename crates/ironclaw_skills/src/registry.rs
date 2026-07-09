@@ -14,6 +14,7 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::io;
 use std::path::{Path, PathBuf};
 

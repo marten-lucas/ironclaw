@@ -3015,6 +3015,7 @@ mod tests {
             "test-model".to_string(),
             thread_id.clone(),
             "request-stream-test".to_string(),
+            None,
         ));
 
         // Two text deltas, then the external-tool gate fires.
@@ -3193,6 +3194,7 @@ mod tests {
             "test-model".to_string(),
             thread_id.clone(),
             "request-empty-test".to_string(),
+            None,
         ));
 
         // An empty StreamChunk creates the Message item but contributes

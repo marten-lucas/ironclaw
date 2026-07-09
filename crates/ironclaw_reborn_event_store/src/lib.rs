@@ -633,12 +633,13 @@ mod postgres_backed {
         }
 
         for host in hosts {
-            match host {
-                Host::Unix(_) => continue,
-                Host::Tcp(name) => {
-                    if !is_local_host_literal(name) {
-                        return false;
-                    }
+            #[cfg(unix)]
+            if let Host::Unix(_) = host {
+                continue;
+            }
+            if let Host::Tcp(name) = host {
+                if !is_local_host_literal(name) {
+                    return false;
                 }
             }
         }

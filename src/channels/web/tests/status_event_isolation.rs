@@ -273,6 +273,7 @@ async fn unscoped_drop_holds_for_every_status_variant_in_multi_tenant() {
 fn _compile_time_appevent_variant_check(e: AppEvent) {
     match e {
         AppEvent::Response { .. }
+        | AppEvent::ResponseScoped { .. }
         | AppEvent::Thinking { .. }
         | AppEvent::ToolStarted { .. }
         | AppEvent::ToolCompleted { .. }

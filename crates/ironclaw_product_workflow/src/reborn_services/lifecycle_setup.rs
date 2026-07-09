@@ -558,11 +558,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_value_prefers_request_payload_over_stored_value() {
-        let mut request = WebUiTestExtensionConnectionRequest::default();
-        request.fields = BTreeMap::from([(
-            "nextcloud_talk_base_url".to_string(),
-            "https://cloud.request.example".to_string(),
-        )]);
+        let request = WebUiTestExtensionConnectionRequest {
+            fields: BTreeMap::from([(
+                "nextcloud_talk_base_url".to_string(),
+                "https://cloud.request.example".to_string(),
+            )]),
+            ..Default::default()
+        };
         let service = StoredValueService {
             value: Some(SecretString::from(
                 "https://cloud.saved.example".to_string(),
@@ -584,9 +586,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_value_uses_stored_value_when_request_is_blank() {
-        let mut request = WebUiTestExtensionConnectionRequest::default();
-        request.fields =
-            BTreeMap::from([("nextcloud_talk_base_url".to_string(), "   ".to_string())]);
+        let request = WebUiTestExtensionConnectionRequest {
+            fields: BTreeMap::from([("nextcloud_talk_base_url".to_string(), "   ".to_string())]),
+            ..Default::default()
+        };
         let service = StoredValueService {
             value: Some(SecretString::from(
                 " https://cloud.saved.example ".to_string(),
