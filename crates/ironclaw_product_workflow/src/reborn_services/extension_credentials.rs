@@ -1,7 +1,7 @@
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountProjection, ProviderScope,
 };
-use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope};
+use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, UserId};
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +11,9 @@ use crate::{
 };
 
 use super::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
+
+const NEXTCLOUD_TALK_EXTENSION_ID: &str = "nextcloud-talk";
+const REBORN_WEBUI_USER_ID_ENV: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExtensionCredentialReadiness {
@@ -30,10 +33,15 @@ pub(super) fn credential_scope(
     caller: &WebUiAuthenticatedCaller,
     package_ref: &LifecyclePackageRef,
 ) -> AuthProductScope {
+    let scope_user_id = credential_scope_user_id(
+        caller,
+        package_ref,
+        configured_nextcloud_scope_user_id().as_deref(),
+    );
     let seed = format!(
         "webui-v2-extension-setup:{}:{}:{}:{}:{}",
         caller.tenant_id.as_str(),
-        caller.user_id.as_str(),
+        scope_user_id.as_str(),
         caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         caller
             .project_id
@@ -45,7 +53,7 @@ pub(super) fn credential_scope(
     AuthProductScope::new(
         ResourceScope {
             tenant_id: caller.tenant_id.clone(),
-            user_id: caller.user_id.clone(),
+            user_id: scope_user_id,
             agent_id: caller.agent_id.clone(),
             project_id: caller.project_id.clone(),
             mission_id: None,
@@ -57,6 +65,27 @@ pub(super) fn credential_scope(
         },
         AuthSurface::Web,
     )
+}
+
+fn configured_nextcloud_scope_user_id() -> Option<String> {
+    std::env::var(REBORN_WEBUI_USER_ID_ENV).ok()
+}
+
+fn credential_scope_user_id(
+    caller: &WebUiAuthenticatedCaller,
+    package_ref: &LifecyclePackageRef,
+    configured_user_id: Option<&str>,
+) -> UserId {
+    if package_ref.id.as_str() != NEXTCLOUD_TALK_EXTENSION_ID {
+        return caller.user_id.clone();
+    }
+    let Some(configured_user_id) = configured_user_id.map(str::trim) else {
+        return caller.user_id.clone();
+    };
+    if configured_user_id.is_empty() {
+        return caller.user_id.clone();
+    }
+    UserId::new(configured_user_id).unwrap_or_else(|_| caller.user_id.clone())
 }
 
 pub(super) fn unique_requirements<'a>(
@@ -225,4 +254,58 @@ fn warn_retryable_status_failure(
         retryable = error.retryable,
         "credential status unavailable during extension credential projection"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+
+    use super::*;
+    use crate::LifecyclePackageKind;
+
+    fn caller() -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant-alpha").expect("valid tenant"),
+            UserId::new("user-alpha").expect("valid user"),
+            Some(AgentId::new("agent-alpha").expect("valid agent")),
+            Some(ProjectId::new("project-alpha").expect("valid project")),
+        )
+    }
+
+    fn extension_ref(id: &str) -> LifecyclePackageRef {
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, id).expect("valid package ref")
+    }
+
+    #[test]
+    fn nextcloud_scope_prefers_configured_service_user() {
+        let resolved = credential_scope_user_id(
+            &caller(),
+            &extension_ref("nextcloud-talk"),
+            Some("reborn-cli"),
+        );
+
+        assert_eq!(resolved.as_str(), "reborn-cli");
+    }
+
+    #[test]
+    fn nextcloud_scope_falls_back_on_invalid_configured_user() {
+        let resolved = credential_scope_user_id(
+            &caller(),
+            &extension_ref("nextcloud-talk"),
+            Some("  "),
+        );
+
+        assert_eq!(resolved.as_str(), "user-alpha");
+    }
+
+    #[test]
+    fn non_nextcloud_scope_keeps_authenticated_user() {
+        let resolved = credential_scope_user_id(
+            &caller(),
+            &extension_ref("github"),
+            Some("reborn-cli"),
+        );
+
+        assert_eq!(resolved.as_str(), "user-alpha");
+    }
 }
