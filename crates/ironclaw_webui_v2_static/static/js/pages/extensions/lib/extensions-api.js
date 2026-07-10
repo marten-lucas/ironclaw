@@ -33,7 +33,10 @@ export function fetchExtensionSetup(packageRef) {
 export function submitExtensionSetup(packageRef, secrets, fields) {
   return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup`, {
     method: "POST",
-    body: JSON.stringify({ secrets, fields }),
+    body: JSON.stringify({
+      action: "submit",
+      payload: { secrets, fields },
+    }),
   });
 }
 export function testExtensionConnection(packageRef, secrets, fields) {
