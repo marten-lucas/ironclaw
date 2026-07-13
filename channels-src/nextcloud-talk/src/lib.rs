@@ -127,10 +127,6 @@ impl Guest for NextcloudTalkAdapter {
                 return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
             }
 
-            if !is_exact_mention_for_bot(&rendered, DEFAULT_BOT_NAME) {
-                return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
-            }
-
             let prompt = strip_mention(&rendered, DEFAULT_BOT_NAME);
             let text = if prompt.is_empty() { rendered } else { prompt };
             build_user_message_inbound(&event, room_token, text)?
@@ -317,7 +313,7 @@ fn build_user_message_inbound(
         payload: InboundPayloadJson::UserMessage(UserMessagePayloadJson {
             text,
             attachments: vec![],
-            trigger: TriggerReasonJson::BotMention,
+            trigger: TriggerReasonJson::DirectChat,
         }),
     };
     serde_json::to_string(&payload)
@@ -397,13 +393,6 @@ fn mention_token(bot_name: &str) -> Option<String> {
     Some(format!("@{trimmed}"))
 }
 
-fn is_exact_mention_for_bot(text: &str, bot_name: &str) -> bool {
-    let Some(token) = mention_token(bot_name) else {
-        return false;
-    };
-    text.contains(&token)
-}
-
 fn strip_mention(text: &str, bot_name: &str) -> String {
     let Some(token) = mention_token(bot_name) else {
         return text.trim().to_string();
@@ -426,18 +415,6 @@ mod tests {
     #[test]
     fn strips_mentions() {
         assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
-    }
-
-    #[test]
-    fn exact_mention_does_not_match_plain_name() {
-        assert!(!is_exact_mention_for_bot("ironclaw please help", "ironclaw"));
-        assert!(is_exact_mention_for_bot("@ironclaw please help", "ironclaw"));
-    }
-
-    #[test]
-    fn exact_mention_supports_configured_display_name() {
-        assert!(!is_exact_mention_for_bot("@ironclaw please help", "helper-bot"));
-        assert!(is_exact_mention_for_bot("@helper-bot please help", "helper-bot"));
     }
 
     #[test]

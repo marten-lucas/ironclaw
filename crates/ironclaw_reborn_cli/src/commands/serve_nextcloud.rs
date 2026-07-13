@@ -19,7 +19,12 @@ pub(crate) fn resolve_nextcloud_talk_config_for_serve(
     let extension_id = DEFAULT_EXTENSION_ID.to_string();
     let webhook_path = DEFAULT_WEBHOOK_PATH.to_string();
 
-    let bot_name = DEFAULT_BOT_NAME.to_string();
+    let bot_name = nextcloud_section
+        .and_then(|section| section.bot_name.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_BOT_NAME)
+        .to_string();
     let nextcloud_host = nextcloud_section
         .and_then(|section| section.base_url.clone())
         .filter(|value| !value.trim().is_empty());
@@ -35,4 +40,63 @@ pub(crate) fn resolve_nextcloud_talk_config_for_serve(
         nextcloud_host,
     };
     Ok(Some(route_config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tenant_id() -> TenantId {
+        TenantId::new("nextcloud-tenant").expect("tenant id")
+    }
+
+    fn agent_id() -> AgentId {
+        AgentId::new("nextcloud-agent").expect("agent id")
+    }
+
+    fn user_id() -> UserId {
+        UserId::new("nextcloud-user").expect("user id")
+    }
+
+    #[test]
+    fn resolve_uses_configured_nextcloud_bot_name() {
+        let nextcloud = NextcloudTalkSection {
+            bot_name: Some("test".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_nextcloud_talk_config_for_serve(
+            Some(&nextcloud),
+            &tenant_id(),
+            &agent_id(),
+            None,
+            &user_id(),
+            Path::new("/tmp/ironclaw.toml"),
+        )
+        .expect("route config")
+        .expect("nextcloud config");
+
+        assert_eq!(config.bot_name, "test");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_default_bot_name_when_config_is_blank() {
+        let nextcloud = NextcloudTalkSection {
+            bot_name: Some("   ".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_nextcloud_talk_config_for_serve(
+            Some(&nextcloud),
+            &tenant_id(),
+            &agent_id(),
+            None,
+            &user_id(),
+            Path::new("/tmp/ironclaw.toml"),
+        )
+        .expect("route config")
+        .expect("nextcloud config");
+
+        assert_eq!(config.bot_name, DEFAULT_BOT_NAME);
+    }
 }

@@ -36,9 +36,9 @@ Ingress behavior:
 2. If signature is configured and invalid, return HTTP 401.
 3. In bridge signature mode, stale timestamp or replay nonce is rejected with HTTP 401.
 4. Ignore bot-authored events and non-Create events with HTTP 200 (no-op).
-5. Mention gate is exact token @<bot_display_name>.
-6. If no exact mention, return HTTP 200 (no-op).
-7. On accepted mention event, submit inbound workflow and return HTTP 200 immediately.
+5. Process every non-empty user-authored `Create` message as an inbound chat turn.
+6. If the message includes the configured `@<bot_display_name>` token, strip that token before submitting the prompt; otherwise preserve the original text.
+7. Submit the accepted inbound workflow as `direct_chat` and return HTTP 200 immediately.
 
 ## Outbound Contract
 

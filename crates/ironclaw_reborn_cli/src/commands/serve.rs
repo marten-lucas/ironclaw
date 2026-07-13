@@ -470,6 +470,7 @@ impl ServeCommand {
             if let Some(nextcloud_talk_config) = nextcloud_talk_config {
                 let nextcloud_mount =
                     build_nextcloud_talk_route_mount(&runtime, nextcloud_talk_config)
+                        .await
                         .context("failed to compose Nextcloud Talk webhook route")?;
                 serve_config = serve_config.with_public_route_mount(nextcloud_mount);
             }

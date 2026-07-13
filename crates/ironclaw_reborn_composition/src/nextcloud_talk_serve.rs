@@ -17,6 +17,7 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
     CredentialAccountSelectionRequest,
 };
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
@@ -102,7 +103,7 @@ pub enum NextcloudTalkBuildError {
     InvalidConfig { field: &'static str, reason: String },
 }
 
-pub fn build_nextcloud_talk_route_mount(
+pub async fn build_nextcloud_talk_route_mount(
     runtime: &RebornRuntime,
     config: NextcloudTalkRouteConfig,
 ) -> Result<PublicRouteMount, NextcloudTalkBuildError> {
@@ -141,6 +142,17 @@ pub fn build_nextcloud_talk_route_mount(
         }
     })?;
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let conversations = Arc::new(
+        local_runtime
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(|error| NextcloudTalkBuildError::InvalidConfig {
+                field: "webhook_path",
+                reason: format!("failed to open durable nextcloud conversation bindings: {error}"),
+            })?,
+    );
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
@@ -775,11 +787,6 @@ fn parse_talk_event(
         return Ok(None);
     }
 
-    let is_mention = is_exact_mention_for_bot(&rendered, bot_name);
-    if !is_mention {
-        return Ok(None);
-    }
-
     let prompt = strip_mention(&rendered, bot_name);
     let text = if prompt.is_empty() { rendered } else { prompt };
     let message_id = event.object.as_ref().and_then(|obj| obj.id.clone());
@@ -788,7 +795,7 @@ fn parse_talk_event(
         .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
 
     let payload = ProductInboundPayload::UserMessage(
-        UserMessagePayload::new(text, vec![], ProductTriggerReason::BotMention).map_err(
+        UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat).map_err(
             |error| ProductWorkflowError::InvalidBindingRequest {
                 reason: error.to_string(),
             },
@@ -861,13 +868,6 @@ fn mention_token(bot_name: &str) -> Option<String> {
         return None;
     }
     Some(format!("@{trimmed}"))
-}
-
-fn is_exact_mention_for_bot(text: &str, bot_name: &str) -> bool {
-    let Some(token) = mention_token(bot_name) else {
-        return false;
-    };
-    text.contains(&token)
 }
 
 fn strip_mention(text: &str, bot_name: &str) -> String {
@@ -945,18 +945,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_mention_requires_at_prefix() {
-        assert!(!is_exact_mention_for_bot(
-            "ironclaw please help",
-            "ironclaw"
-        ));
-        assert!(is_exact_mention_for_bot(
-            "@ironclaw please help",
-            "ironclaw"
-        ));
-    }
-
-    #[test]
     fn strip_mention_only_removes_explicit_token() {
         assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
         assert_eq!(
@@ -965,8 +953,22 @@ mod tests {
         );
     }
 
+    fn assert_user_message_payload(
+        parsed: ParsedProductInbound,
+        expected_text: &str,
+        expected_trigger: ProductTriggerReason,
+    ) {
+        match parsed.payload() {
+            ProductInboundPayload::UserMessage(payload) => {
+                assert_eq!(payload.text, expected_text);
+                assert_eq!(payload.trigger, expected_trigger);
+            }
+            other => panic!("expected user message payload, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn parse_talk_event_accepts_create_with_exact_mention() {
+    fn parse_talk_event_accepts_create_with_or_without_mention() {
         let event = TalkEvent {
             event_type: "Create".to_string(),
             actor: Some(TalkActor {
@@ -983,15 +985,18 @@ mod tests {
             }),
         };
 
-        let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
-        assert!(
-            parsed.is_some(),
-            "exact mention must produce inbound payload"
+        let parsed = parse_talk_event(&event, "ironclaw")
+            .expect("parse result")
+            .expect("mentioned messages must produce inbound payload");
+        assert_user_message_payload(
+            parsed,
+            "please summarize this",
+            ProductTriggerReason::DirectChat,
         );
     }
 
     #[test]
-    fn parse_talk_event_ignores_create_without_exact_mention() {
+    fn parse_talk_event_accepts_create_without_mention() {
         let event = TalkEvent {
             event_type: "Create".to_string(),
             actor: Some(TalkActor {
@@ -1001,15 +1006,21 @@ mod tests {
             }),
             object: Some(TalkObject {
                 id: Some("42".to_string()),
-                content: Some("ironclaw please summarize this".to_string()),
+                content: Some("please summarize this".to_string()),
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
             }),
         };
 
-        let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
-        assert!(parsed.is_none(), "non-mentioned messages must be ignored");
+        let parsed = parse_talk_event(&event, "ironclaw")
+            .expect("parse result")
+            .expect("non-mentioned messages must now be accepted");
+        assert_user_message_payload(
+            parsed,
+            "please summarize this",
+            ProductTriggerReason::DirectChat,
+        );
     }
 
     #[test]
