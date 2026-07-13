@@ -17,8 +17,8 @@ name: Nightly Deep CI
 # Full browser E2E is scheduled separately by .github/workflows/e2e.yml.
 
 on:
-  schedule:
-    - cron: "0 4 * * *" # Daily deterministic deep CI at 04:00 UTC
+  # Manual-only in this fork; scheduled deep CI produced recurring startup
+  # failures and should be run on demand until configuration is aligned.
   workflow_dispatch:
 
 permissions:

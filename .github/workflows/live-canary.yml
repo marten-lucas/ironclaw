@@ -1,15 +1,8 @@
 name: Live Canary
 
 on:
-  # Every job's `if:` guard matches the one cron below. Adding a new
-  # scheduled slot means also updating those guards, so keep this
-  # block and the job conditions in lockstep.
-  schedule:
-    # Every 6 hours (00, 06, 12, 18 UTC). Every lane runs as parallel
-    # jobs in the same workflow run; one run = one red dot on failure,
-    # one notification, one place to drill into per-lane status.
-    # Job-level `if:` guards below all match this cron.
-    - cron: "0 */6 * * *"
+  # Keep live-canary manual in this fork to avoid noisy scheduled failures
+  # when external providers/secrets are unavailable.
   workflow_dispatch:
     inputs:
       lane:
