@@ -118,19 +118,40 @@ impl NextcloudTalkFinalReplyDriver {
         } = task;
 
         // Resolve the conversation binding to get the thread_id and TurnScope.
-        let binding = self
+        // Nextcloud inbound now uses DirectChat routing. Keep a Shared fallback
+        // so legacy conversations created before that change still deliver.
+        let binding = match self
             .binding_service
             .lookup_binding(ResolveBindingRequest {
-                adapter_id,
-                installation_id,
-                external_actor_ref,
+                adapter_id: adapter_id.clone(),
+                installation_id: installation_id.clone(),
+                external_actor_ref: external_actor_ref.clone(),
                 external_conversation_ref: external_conversation_ref.clone(),
-                external_event_id,
-                route_kind: ironclaw_product_workflow::ProductConversationRouteKind::Shared,
-                auth_claim,
+                external_event_id: external_event_id.clone(),
+                route_kind: ironclaw_product_workflow::ProductConversationRouteKind::Direct,
+                auth_claim: auth_claim.clone(),
             })
             .await
-            .map_err(|error| NextcloudDeliveryError::BindingLookup(error.to_string()))?;
+        {
+            Ok(binding) => binding,
+            Err(direct_error) => self
+                .binding_service
+                .lookup_binding(ResolveBindingRequest {
+                    adapter_id,
+                    installation_id,
+                    external_actor_ref,
+                    external_conversation_ref: external_conversation_ref.clone(),
+                    external_event_id,
+                    route_kind: ironclaw_product_workflow::ProductConversationRouteKind::Shared,
+                    auth_claim,
+                })
+                .await
+                .map_err(|shared_error| {
+                    NextcloudDeliveryError::BindingLookup(format!(
+                        "direct route lookup failed: {direct_error}; shared fallback failed: {shared_error}"
+                    ))
+                })?,
+        };
 
         let turn_scope = TurnScope::new(
             binding.tenant_id.clone(),
