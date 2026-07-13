@@ -120,7 +120,27 @@ jobs:
             echo "target=runtime" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check Docker Hub credentials
+        id: docker_creds
+        env:
+          DOCKER_REGISTRY_USER: ${{ vars.DOCKER_REGISTRY_USER }}
+          DOCKER_REGISTRY_TOKEN: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "${DOCKER_REGISTRY_USER}" || -z "${DOCKER_REGISTRY_TOKEN}" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Docker Images"
+              echo ""
+              echo "Docker image build skipped because Docker Hub credentials are not configured in this repository."
+              echo "Set repo variable \`DOCKER_REGISTRY_USER\` and secret \`DOCKER_REGISTRY_TOKEN\` to re-enable publishing."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Log in to Docker Hub
+        if: steps.docker_creds.outputs.enabled == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           username: ${{ vars.DOCKER_REGISTRY_USER }}
@@ -128,7 +148,7 @@ jobs:
 
       - name: Check if current git commit is already built
         id: check
-        if: steps.tags.outputs.target == 'runtime-staging'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.tags.outputs.target == 'runtime-staging'
         env:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
@@ -155,11 +175,11 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        if: steps.check.outputs.skip != 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.check.outputs.skip != 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build and push (ironclaw)
-        if: steps.check.outputs.skip != 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -173,7 +193,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push (ironclaw-worker)
-        if: steps.check.outputs.skip != 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.check.outputs.skip != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -188,7 +208,7 @@ jobs:
 
       - name: Create releases-manager app token
         id: app-token
-        if: steps.check.outputs.skip != 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.check.outputs.skip != 'true'
         continue-on-error: true
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
@@ -198,7 +218,7 @@ jobs:
           repositories: ironclaw-dind
 
       - name: Trigger ironclaw-dind Build & Push
-        if: steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.app-token.outcome == 'success' && steps.check.outputs.skip != 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -219,7 +239,7 @@ jobs:
           fi
 
       - name: Summary
-        if: steps.check.outputs.skip != 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.check.outputs.skip != 'true'
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
           WORKER_TAGS: ${{ steps.tags.outputs.worker_tags }}
@@ -244,7 +264,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summary (skipped)
-        if: steps.check.outputs.skip == 'true'
+        if: steps.docker_creds.outputs.enabled == 'true' && steps.check.outputs.skip == 'true'
         env:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
