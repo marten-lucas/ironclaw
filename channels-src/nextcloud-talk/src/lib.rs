@@ -254,13 +254,13 @@ fn build_noop_inbound(event: &TalkEvent) -> Result<String, String> {
     let actor_id = event
         .actor
         .as_ref()
-        .and_then(|a| a.id.clone())
+        .and_then(|a| non_empty_trimmed(a.id.as_deref()))
         .unwrap_or_else(|| "unknown-actor".to_string());
     let room_token = extract_room_token(event).unwrap_or_else(|| "unknown-room".to_string());
     let event_id = event
         .object
         .as_ref()
-        .and_then(|obj| obj.id.clone())
+        .and_then(|obj| non_empty_trimmed(obj.id.as_deref()))
         .unwrap_or_else(|| format!("event:{}:{room_token}:{actor_id}", event.event_type));
 
     let payload = ParsedInboundJson {
@@ -268,7 +268,10 @@ fn build_noop_inbound(event: &TalkEvent) -> Result<String, String> {
         external_actor_ref: ExternalActorRefJson {
             kind: "nextcloud_user".to_string(),
             id: actor_id,
-            display_name: event.actor.as_ref().and_then(|a| a.name.clone()),
+            display_name: event
+                .actor
+                .as_ref()
+                .and_then(|a| non_empty_trimmed(a.name.as_deref())),
         },
         external_conversation_ref: ExternalConversationRefJson {
             space_id: None,
@@ -290,9 +293,12 @@ fn build_user_message_inbound(
     let actor_id = event
         .actor
         .as_ref()
-        .and_then(|a| a.id.clone())
+        .and_then(|a| non_empty_trimmed(a.id.as_deref()))
         .unwrap_or_else(|| "unknown-actor".to_string());
-    let message_id = event.object.as_ref().and_then(|obj| obj.id.clone());
+    let message_id = event
+        .object
+        .as_ref()
+        .and_then(|obj| non_empty_trimmed(obj.id.as_deref()));
     let event_id = message_id
         .clone()
         .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
@@ -302,7 +308,10 @@ fn build_user_message_inbound(
         external_actor_ref: ExternalActorRefJson {
             kind: "nextcloud_user".to_string(),
             id: actor_id,
-            display_name: event.actor.as_ref().and_then(|a| a.name.clone()),
+            display_name: event
+                .actor
+                .as_ref()
+                .and_then(|a| non_empty_trimmed(a.name.as_deref())),
         },
         external_conversation_ref: ExternalConversationRefJson {
             space_id: None,
@@ -323,8 +332,15 @@ fn build_user_message_inbound(
 fn extract_room_token(event: &TalkEvent) -> Option<String> {
     event.target
         .as_ref()
-        .and_then(|v| v.id.clone())
-        .or_else(|| event.object.as_ref().and_then(|v| v.id.clone()))
+        .and_then(|v| non_empty_trimmed(v.id.as_deref()))
+        .or_else(|| event.object.as_ref().and_then(|v| non_empty_trimmed(v.id.as_deref())))
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn is_bot_authored(event: &TalkEvent) -> bool {

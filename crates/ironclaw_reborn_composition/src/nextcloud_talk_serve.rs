@@ -773,9 +773,12 @@ fn parse_talk_event(
     let actor_id = event
         .actor
         .as_ref()
-        .and_then(|actor| actor.id.clone())
+        .and_then(|actor| non_empty_trimmed(actor.id.as_deref()))
         .unwrap_or_else(|| "unknown-actor".to_string());
-    let actor_name = event.actor.as_ref().and_then(|actor| actor.name.clone());
+    let actor_name = event
+        .actor
+        .as_ref()
+        .and_then(|actor| non_empty_trimmed(actor.name.as_deref()));
 
     let raw_content = event
         .object
@@ -789,7 +792,10 @@ fn parse_talk_event(
 
     let prompt = strip_mention(&rendered, bot_name);
     let text = if prompt.is_empty() { rendered } else { prompt };
-    let message_id = event.object.as_ref().and_then(|obj| obj.id.clone());
+    let message_id = event
+        .object
+        .as_ref()
+        .and_then(|obj| non_empty_trimmed(obj.id.as_deref()));
     let event_id = message_id
         .clone()
         .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
@@ -834,8 +840,19 @@ fn extract_room_token(event: &TalkEvent) -> Option<String> {
     event
         .target
         .as_ref()
-        .and_then(|value| value.id.clone())
-        .or_else(|| event.object.as_ref().and_then(|value| value.id.clone()))
+        .and_then(|value| non_empty_trimmed(value.id.as_deref()))
+        .or_else(|| {
+            event.object
+                .as_ref()
+                .and_then(|value| non_empty_trimmed(value.id.as_deref()))
+        })
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn is_bot_authored(event: &TalkEvent) -> bool {
@@ -1021,6 +1038,36 @@ mod tests {
             "please summarize this",
             ProductTriggerReason::DirectChat,
         );
+    }
+
+    #[test]
+    fn parse_talk_event_tolerates_blank_actor_and_message_ids() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("   ".to_string()),
+                name: Some("  Vorstand  ".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some(" ".to_string()),
+                content: Some("test 12:16".to_string()),
+            }),
+            target: Some(TalkTarget {
+                id: Some("3pjrvc7d".to_string()),
+            }),
+        };
+
+        let parsed = parse_talk_event(&event, "ki_assistant")
+            .expect("parse result")
+            .expect("blank actor/message ids should fall back instead of failing");
+
+        assert_eq!(parsed.external_event_id.as_str(), "create:3pjrvc7d:unknown-actor");
+        assert_eq!(parsed.external_actor_ref.id(), "unknown-actor");
+        assert_eq!(parsed.external_actor_ref.display_name(), Some("Vorstand"));
+        assert_eq!(parsed.external_conversation_ref.conversation_id(), "3pjrvc7d");
+        assert_eq!(parsed.external_conversation_ref.reply_target_message_id(), None);
+        assert_user_message_payload(parsed, "test 12:16", ProductTriggerReason::DirectChat);
     }
 
     #[test]
