@@ -125,7 +125,7 @@ fn resolve_thinking_mode_override(
 fn resolve_request_model_override(metadata: &serde_json::Value) -> Option<String> {
     metadata
         .get("selected_model")
-        .and_then(|v| selected_model_override(v))
+        .and_then(selected_model_override)
 }
 
 fn chat_job_context(

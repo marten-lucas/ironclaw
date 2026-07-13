@@ -401,6 +401,14 @@ fn resolve_response_timeout(timeout_sec: Option<u64>) -> Option<Duration> {
     }
 }
 
+#[derive(Clone)]
+struct ResponseDispatchContext {
+    thread_id: String,
+    request_id: String,
+    user_id: String,
+    response_timeout: Option<Duration>,
+}
+
 // ---------------------------------------------------------------------------
 // ID encoding/decoding
 // ---------------------------------------------------------------------------
@@ -1661,18 +1669,19 @@ pub async fn create_response_handler(
 
         let model = request_model.clone();
         let stream = req.stream.unwrap_or(false);
-        let user_id = user.user_id.clone();
-        let response_timeout = resolve_response_timeout(req.timeout_sec);
+        let context = ResponseDispatchContext {
+            thread_id: thread_id_str,
+            request_id: response_request_id,
+            user_id: user.user_id.clone(),
+            response_timeout: resolve_response_timeout(req.timeout_sec),
+        };
         if stream {
             return handle_streaming(
                 state,
                 resume_msg,
                 resp_id,
                 model,
-                thread_id_str,
-                response_request_id,
-                user_id,
-                response_timeout,
+                context,
             )
             .await
             .map(IntoResponse::into_response);
@@ -1682,10 +1691,7 @@ pub async fn create_response_handler(
                 resume_msg,
                 resp_id,
                 model,
-                thread_id_str,
-                response_request_id,
-                &user_id,
-                response_timeout,
+                context,
             )
             .await
             .map(IntoResponse::into_response);
@@ -1733,8 +1739,12 @@ pub async fn create_response_handler(
 
     let model = request_model;
     let stream = req.stream.unwrap_or(false);
-    let user_id = user.user_id.clone();
-    let response_timeout = resolve_response_timeout(req.timeout_sec);
+    let context = ResponseDispatchContext {
+        thread_id: thread_id_str,
+        request_id: response_request_id,
+        user_id: user.user_id.clone(),
+        response_timeout: resolve_response_timeout(req.timeout_sec),
+    };
 
     if stream {
         handle_streaming(
@@ -1742,10 +1752,7 @@ pub async fn create_response_handler(
             msg,
             resp_id,
             model,
-            thread_id_str,
-            response_request_id,
-            user_id,
-            response_timeout,
+            context,
         )
         .await
         .map(IntoResponse::into_response)
@@ -1755,11 +1762,8 @@ pub async fn create_response_handler(
             msg,
             resp_id,
             model,
-            thread_id_str,
-            response_request_id,
-            &user_id,
+            context,
             req.previous_response_id.is_some(),
-            response_timeout,
         )
         .await
         .map(IntoResponse::into_response)
@@ -1771,15 +1775,12 @@ async fn handle_non_streaming(
     msg: IncomingMessage,
     resp_id: String,
     model: String,
-    thread_id: String,
-    request_id: String,
-    user_id: &str,
-    response_timeout: Option<Duration>,
+    context: ResponseDispatchContext,
 ) -> Result<Json<ResponseObject>, ApiError> {
     // Subscribe BEFORE sending so we don't miss events.
     let mut event_stream = state
         .sse
-        .subscribe_raw(Some(user_id.to_string()), false)
+        .subscribe_raw(Some(context.user_id.clone()), false)
         .ok_or_else(|| {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1794,7 +1795,12 @@ async fn handle_non_streaming(
 
     let wait_for_completion = async {
         while let Some(event) = event_stream.next().await {
-            if !event_matches_response_scope(&event, &thread_id, &request_id, &resp_id) {
+            if !event_matches_response_scope(
+                &event,
+                &context.thread_id,
+                &context.request_id,
+                &resp_id,
+            ) {
                 continue;
             }
             if acc.process(event) {
@@ -1803,7 +1809,7 @@ async fn handle_non_streaming(
         }
     };
 
-    let timed_out = if let Some(timeout) = response_timeout {
+    let timed_out = if let Some(timeout) = context.response_timeout {
         tokio::time::timeout(timeout, wait_for_completion)
             .await
             .is_err()
@@ -1826,21 +1832,15 @@ async fn handle_non_streaming_with_fresh_thread_fallback(
     msg: IncomingMessage,
     resp_id: String,
     model: String,
-    thread_id: String,
-    request_id: String,
-    user_id: &str,
+    context: ResponseDispatchContext,
     allow_fresh_retry: bool,
-    response_timeout: Option<Duration>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     let first = handle_non_streaming(
         state.clone(),
         msg.clone(),
         resp_id,
         model.clone(),
-        thread_id,
-        request_id,
-        user_id,
-        response_timeout,
+        context.clone(),
     )
     .await?;
 
@@ -1869,10 +1869,12 @@ async fn handle_non_streaming_with_fresh_thread_fallback(
         retry_msg,
         retry_resp_id,
         model,
-        retry_thread_id,
-        retry_request_id,
-        user_id,
-        response_timeout,
+        ResponseDispatchContext {
+            thread_id: retry_thread_id,
+            request_id: retry_request_id,
+            user_id: context.user_id,
+            response_timeout: context.response_timeout,
+        },
     )
     .await?;
 
@@ -1890,14 +1892,11 @@ async fn handle_streaming(
     msg: IncomingMessage,
     resp_id: String,
     model: String,
-    thread_id: String,
-    request_id: String,
-    user_id: String,
-    response_timeout: Option<Duration>,
+    context: ResponseDispatchContext,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
     let event_stream = state
         .sse
-        .subscribe_raw(Some(user_id), false)
+        .subscribe_raw(Some(context.user_id.clone()), false)
         .ok_or_else(|| {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1916,9 +1915,9 @@ async fn handle_streaming(
         event_stream,
         resp_id,
         model,
-        thread_id,
-        request_id,
-        response_timeout,
+        context.thread_id,
+        context.request_id,
+        context.response_timeout,
     ));
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>);
@@ -2400,7 +2399,6 @@ async fn streaming_worker(
             "response.failed",
             &ResponseStreamEvent::ResponseFailed { response: resp },
         );
-        return;
     }
 }
 

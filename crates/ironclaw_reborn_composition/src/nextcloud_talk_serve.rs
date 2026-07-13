@@ -980,7 +980,7 @@ mod tests {
         expected_text: &str,
         expected_trigger: ProductTriggerReason,
     ) {
-        match parsed.payload() {
+        match parsed.payload {
             ProductInboundPayload::UserMessage(payload) => {
                 assert_eq!(payload.text, expected_text);
                 assert_eq!(payload.trigger, expected_trigger);
