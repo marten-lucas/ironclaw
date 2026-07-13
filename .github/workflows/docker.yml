@@ -29,7 +29,7 @@ on:
         default: ""
   # Rolling :staging image tags from main branch (hourly)
   schedule:
-    - cron: '0 * * * *'
+    - cron: "0 * * * *"
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
