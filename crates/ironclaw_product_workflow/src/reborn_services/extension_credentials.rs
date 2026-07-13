@@ -289,22 +289,16 @@ mod tests {
 
     #[test]
     fn nextcloud_scope_falls_back_on_invalid_configured_user() {
-        let resolved = credential_scope_user_id(
-            &caller(),
-            &extension_ref("nextcloud-talk"),
-            Some("  "),
-        );
+        let resolved =
+            credential_scope_user_id(&caller(), &extension_ref("nextcloud-talk"), Some("  "));
 
         assert_eq!(resolved.as_str(), "user-alpha");
     }
 
     #[test]
     fn non_nextcloud_scope_keeps_authenticated_user() {
-        let resolved = credential_scope_user_id(
-            &caller(),
-            &extension_ref("github"),
-            Some("reborn-cli"),
-        );
+        let resolved =
+            credential_scope_user_id(&caller(), &extension_ref("github"), Some("reborn-cli"));
 
         assert_eq!(resolved.as_str(), "user-alpha");
     }

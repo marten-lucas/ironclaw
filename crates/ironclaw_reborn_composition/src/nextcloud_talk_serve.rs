@@ -696,7 +696,9 @@ fn verify_bridge_signature(
     else {
         return Err("missing_timestamp");
     };
-    let timestamp = timestamp_raw.parse::<i64>().map_err(|_| "invalid_timestamp")?;
+    let timestamp = timestamp_raw
+        .parse::<i64>()
+        .map_err(|_| "invalid_timestamp")?;
 
     let now = Utc::now().timestamp();
     if now.abs_diff(timestamp) > tolerance_seconds as u64 {
@@ -739,7 +741,9 @@ fn verify_bridge_signature(
         return Err("invalid_signature");
     }
 
-    let mut guard = replay_guard.lock().map_err(|_| "replay_guard_unavailable")?;
+    let mut guard = replay_guard
+        .lock()
+        .map_err(|_| "replay_guard_unavailable")?;
     if !guard.record_once(nonce, now, tolerance_seconds) {
         return Err("replay_nonce");
     }
@@ -842,7 +846,8 @@ fn extract_room_token(event: &TalkEvent) -> Option<String> {
         .as_ref()
         .and_then(|value| non_empty_trimmed(value.id.as_deref()))
         .or_else(|| {
-            event.object
+            event
+                .object
                 .as_ref()
                 .and_then(|value| non_empty_trimmed(value.id.as_deref()))
         })
@@ -1062,11 +1067,20 @@ mod tests {
             .expect("parse result")
             .expect("blank actor/message ids should fall back instead of failing");
 
-        assert_eq!(parsed.external_event_id.as_str(), "create:3pjrvc7d:unknown-actor");
+        assert_eq!(
+            parsed.external_event_id.as_str(),
+            "create:3pjrvc7d:unknown-actor"
+        );
         assert_eq!(parsed.external_actor_ref.id(), "unknown-actor");
         assert_eq!(parsed.external_actor_ref.display_name(), Some("Vorstand"));
-        assert_eq!(parsed.external_conversation_ref.conversation_id(), "3pjrvc7d");
-        assert_eq!(parsed.external_conversation_ref.reply_target_message_id(), None);
+        assert_eq!(
+            parsed.external_conversation_ref.conversation_id(),
+            "3pjrvc7d"
+        );
+        assert_eq!(
+            parsed.external_conversation_ref.reply_target_message_id(),
+            None
+        );
         assert_user_message_payload(parsed, "test 12:16", ProductTriggerReason::DirectChat);
     }
 
@@ -1108,8 +1122,14 @@ mod tests {
         let signature = format!("{:x}", mac.finalize().into_bytes());
 
         let mut headers = HeaderMap::new();
-        headers.insert(BRIDGE_TIMESTAMP_HEADER, HeaderValue::from_str(&timestamp).expect("ts"));
-        headers.insert(BRIDGE_NONCE_HEADER, HeaderValue::from_str(nonce).expect("nonce"));
+        headers.insert(
+            BRIDGE_TIMESTAMP_HEADER,
+            HeaderValue::from_str(&timestamp).expect("ts"),
+        );
+        headers.insert(
+            BRIDGE_NONCE_HEADER,
+            HeaderValue::from_str(nonce).expect("nonce"),
+        );
         headers.insert(
             BRIDGE_SIGNATURE_HEADER,
             HeaderValue::from_str(&signature).expect("signature"),
@@ -1151,8 +1171,14 @@ mod tests {
         let signature = format!("{:x}", mac.finalize().into_bytes());
 
         let mut headers = HeaderMap::new();
-        headers.insert(BRIDGE_TIMESTAMP_HEADER, HeaderValue::from_str(&timestamp).expect("ts"));
-        headers.insert(BRIDGE_NONCE_HEADER, HeaderValue::from_str(nonce).expect("nonce"));
+        headers.insert(
+            BRIDGE_TIMESTAMP_HEADER,
+            HeaderValue::from_str(&timestamp).expect("ts"),
+        );
+        headers.insert(
+            BRIDGE_NONCE_HEADER,
+            HeaderValue::from_str(nonce).expect("nonce"),
+        );
         headers.insert(
             BRIDGE_SIGNATURE_HEADER,
             HeaderValue::from_str(&signature).expect("signature"),

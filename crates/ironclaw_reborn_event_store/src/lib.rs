@@ -637,10 +637,10 @@ mod postgres_backed {
             if let Host::Unix(_) = host {
                 continue;
             }
-            if let Host::Tcp(name) = host {
-                if !is_local_host_literal(name) {
-                    return false;
-                }
+            if let Host::Tcp(name) = host
+                && !is_local_host_literal(name)
+            {
+                return false;
             }
         }
         for addr in hostaddrs {
