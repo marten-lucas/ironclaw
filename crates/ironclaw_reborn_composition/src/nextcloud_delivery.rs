@@ -41,6 +41,8 @@ use ironclaw_secrets::SecretStore;
 
 const DEFAULT_DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(120);
+const FINAL_REPLY_LOOKUP_INTERVAL: Duration = Duration::from_millis(250);
+const FINAL_REPLY_LOOKUP_MAX_WAIT: Duration = Duration::from_secs(12);
 
 /// Per-instance delivery configuration for Nextcloud Talk.
 ///
@@ -185,21 +187,14 @@ impl NextcloudTalkFinalReplyDriver {
             }
         };
         let reply_text = self
-            .thread_service
-            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-                scope: thread_scope,
-                thread_id: turn_scope.thread_id.clone(),
-                turn_run_id: run_id.to_string(),
-            })
-            .await
-            .map_err(|error| NextcloudDeliveryError::ThreadRead(error.to_string()))?
-            .and_then(|record| record.content);
+            .await_finalized_reply_text(&thread_scope, &turn_scope.thread_id, run_id)
+            .await?;
 
         let Some(text) = reply_text else {
             tracing::debug!(
                 target = "ironclaw::reborn::nextcloud_delivery",
                 %run_id,
-                "Nextcloud Talk completed run has no finalized assistant text; skipping reply delivery"
+                "Nextcloud Talk completed run has no finalized assistant text after wait window; skipping reply delivery"
             );
             return Ok(());
         };
@@ -272,6 +267,37 @@ impl NextcloudTalkFinalReplyDriver {
         );
 
         Ok(())
+    }
+
+    async fn await_finalized_reply_text(
+        &self,
+        scope: &ironclaw_threads::ThreadScope,
+        thread_id: &ironclaw_host_api::ThreadId,
+        run_id: TurnRunId,
+    ) -> Result<Option<String>, NextcloudDeliveryError> {
+        let start = std::time::Instant::now();
+        loop {
+            let reply = self
+                .thread_service
+                .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+                    scope: scope.clone(),
+                    thread_id: thread_id.clone(),
+                    turn_run_id: run_id.to_string(),
+                })
+                .await
+                .map_err(|error| NextcloudDeliveryError::ThreadRead(error.to_string()))?
+                .and_then(|record| record.content);
+
+            if reply.is_some() {
+                return Ok(reply);
+            }
+
+            if start.elapsed() > FINAL_REPLY_LOOKUP_MAX_WAIT {
+                return Ok(None);
+            }
+
+            tokio::time::sleep(FINAL_REPLY_LOOKUP_INTERVAL).await;
+        }
     }
 
     async fn wait_for_terminal(
