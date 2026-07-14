@@ -793,7 +793,13 @@ fn map_secret_store_error(error: SecretStoreError) -> NextcloudSecretResolutionE
 }
 
 fn deserialize_talk_event(body: &[u8]) -> Result<TalkEvent, ()> {
+    let body = trim_utf8_bom_and_ws(body);
+
     if let Ok(event) = serde_json::from_slice::<TalkEvent>(body) {
+        return Ok(event);
+    }
+
+    if let Some(event) = deserialize_event_from_form_body(body) {
         return Ok(event);
     }
 
@@ -809,8 +815,26 @@ fn deserialize_talk_event(body: &[u8]) -> Result<TalkEvent, ()> {
                 .map_err(|_| ());
         }
 
+        if let Some(Value::String(payload_json)) = map.get("payload")
+            && let Ok(event) = serde_json::from_str::<TalkEvent>(payload_json)
+        {
+            return Ok(event);
+        }
+
         if let Some(Value::String(inner_json)) = map.get("body")
             && let Ok(event) = serde_json::from_str::<TalkEvent>(inner_json)
+        {
+            return Ok(event);
+        }
+
+        if let Some(Value::Object(data)) = map.get("data")
+            && let Ok(event) = serde_json::from_value::<TalkEvent>(Value::Object(data.clone()))
+        {
+            return Ok(event);
+        }
+
+        if let Some(Value::String(data_json)) = map.get("data")
+            && let Ok(event) = serde_json::from_str::<TalkEvent>(data_json)
         {
             return Ok(event);
         }
@@ -825,6 +849,63 @@ fn deserialize_talk_event(body: &[u8]) -> Result<TalkEvent, ()> {
     }
 
     Err(())
+}
+
+fn trim_utf8_bom_and_ws(mut body: &[u8]) -> &[u8] {
+    if body.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        body = &body[3..];
+    }
+    while let Some(byte) = body.first() {
+        if byte.is_ascii_whitespace() {
+            body = &body[1..];
+        } else {
+            break;
+        }
+    }
+    body
+}
+
+fn deserialize_event_from_form_body(body: &[u8]) -> Option<TalkEvent> {
+    let body_str = std::str::from_utf8(body).ok()?;
+    let mut candidate_json_values: Vec<String> = Vec::new();
+
+    for (key, value) in url::form_urlencoded::parse(body_str.as_bytes()) {
+        let key = key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if matches!(key.as_str(), "payload" | "body" | "event" | "json" | "data") {
+            let value = value.trim();
+            if !value.is_empty() {
+                candidate_json_values.push(value.to_string());
+            }
+        }
+    }
+
+    for json_payload in candidate_json_values {
+        if let Ok(event) = serde_json::from_str::<TalkEvent>(&json_payload) {
+            return Some(event);
+        }
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&json_payload) {
+            if let Some(Value::Object(payload)) = map.get("payload")
+                && let Ok(event) = serde_json::from_value::<TalkEvent>(Value::Object(payload.clone()))
+            {
+                return Some(event);
+            }
+            if let Some(Value::String(payload_json)) = map.get("payload")
+                && let Ok(event) = serde_json::from_str::<TalkEvent>(payload_json)
+            {
+                return Some(event);
+            }
+            if let Some(Value::String(inner_json)) = map.get("body")
+                && let Ok(event) = serde_json::from_str::<TalkEvent>(inner_json)
+            {
+                return Some(event);
+            }
+        }
+    }
+
+    None
 }
 
 async fn validate_declared_reply_user(
@@ -1638,6 +1719,38 @@ mod tests {
         let body = br#"{"eventType":"Create","target":{"id":"room-1"},"object":{"content":"hallo"}}"#;
 
         let parsed = deserialize_talk_event(body).expect("parse eventType alias payload");
+        assert_eq!(parsed.event_type, "Create");
+        assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
+    }
+
+    #[test]
+    fn deserialize_talk_event_accepts_form_urlencoded_payload_field() {
+        let json = r#"{"type":"Create","target":{"id":"room-1"},"object":{"content":"hallo"}}"#;
+        let encoded: String = url::form_urlencoded::byte_serialize(json.as_bytes()).collect();
+        let body = format!("payload={encoded}");
+
+        let parsed = deserialize_talk_event(body.as_bytes()).expect("parse form payload");
+        assert_eq!(parsed.event_type, "Create");
+        assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
+    }
+
+    #[test]
+    fn deserialize_talk_event_accepts_utf8_bom_prefix() {
+        let mut body = vec![0xEF, 0xBB, 0xBF];
+        body.extend_from_slice(
+            br#"{"type":"Create","target":{"id":"room-1"},"object":{"content":"hallo"}}"#,
+        );
+
+        let parsed = deserialize_talk_event(&body).expect("parse bom prefixed json");
+        assert_eq!(parsed.event_type, "Create");
+        assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
+    }
+
+    #[test]
+    fn deserialize_talk_event_accepts_payload_string_wrapper() {
+        let body = br#"{"payload":"{\"type\":\"Create\",\"target\":{\"id\":\"room-1\"},\"object\":{\"content\":\"hallo\"}}"}"#;
+
+        let parsed = deserialize_talk_event(body).expect("parse payload string wrapper");
         assert_eq!(parsed.event_type, "Create");
         assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
     }
