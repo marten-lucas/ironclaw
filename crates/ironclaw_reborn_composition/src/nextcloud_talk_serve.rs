@@ -820,12 +820,22 @@ async fn resolve_nextcloud_delivery_host_fallback(
     )
     .await;
 
-    let Some(base_url) = base_url else {
-        tracing::warn!(
-            target = "ironclaw::reborn::nextcloud_talk",
-            "nextcloud talk delivery host is not configured and nextcloud_talk_base_url fallback is unavailable; outbound reply delivery remains disabled"
-        );
-        return Ok(None);
+    let base_url = match base_url {
+        Ok(Some(value)) => value,
+        Ok(None) | Err(NextcloudSecretResolutionError::Missing) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_talk",
+                "nextcloud talk delivery host is not configured and nextcloud_talk_base_url fallback is unavailable; outbound reply delivery remains disabled"
+            );
+            return Ok(None);
+        }
+        Err(NextcloudSecretResolutionError::Backend) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_talk",
+                "nextcloud_talk_base_url credential backend unavailable; outbound reply delivery remains disabled"
+            );
+            return Ok(None);
+        }
     };
 
     let parsed = match Url::parse(base_url.trim()) {
