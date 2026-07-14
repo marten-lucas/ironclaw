@@ -518,6 +518,26 @@ async fn nextcloud_talk_handler(
     let event = match deserialize_talk_event(body.as_ref()) {
         Ok(value) => value,
         Err(_) => {
+            let content_type = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<missing>");
+            let content_encoding = headers
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<none>");
+            let preview = preview_body_for_log(body.as_ref(), 320);
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_talk",
+                webhook_path = %state.webhook_path,
+                content_type,
+                content_encoding,
+                body_len = body.len(),
+                body_preview = %preview,
+                has_bridge_signature = headers.get(BRIDGE_SIGNATURE_HEADER).is_some(),
+                has_nextcloud_signature = headers.get(NEXTCLOUD_SIGNATURE_HEADER).is_some(),
+                "nextcloud talk webhook rejected: unable to deserialize event payload"
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(NextcloudErrorBody {
@@ -906,6 +926,16 @@ fn deserialize_event_from_form_body(body: &[u8]) -> Option<TalkEvent> {
     }
 
     None
+}
+
+fn preview_body_for_log(body: &[u8], max_chars: usize) -> String {
+    let text = String::from_utf8_lossy(body);
+    let mut preview = text.chars().take(max_chars).collect::<String>();
+    preview = preview.replace('\n', "\\n").replace('\r', "\\r");
+    if text.chars().count() > max_chars {
+        preview.push_str("...(truncated)");
+    }
+    preview
 }
 
 async fn validate_declared_reply_user(
