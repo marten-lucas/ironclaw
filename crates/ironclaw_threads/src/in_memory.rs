@@ -74,25 +74,42 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let EnsureThreadRequest {
+            scope,
+            thread_id,
+            created_by_actor_id,
+            title,
+            metadata_json,
+        } = request;
         let mut state = self.state.lock().await;
-        let thread_id = match request.thread_id {
+        let thread_id = match thread_id {
             Some(thread_id) => thread_id,
             None => generated_thread_id()?,
         };
-        if let Some(existing) = state.threads.get(&thread_id) {
-            if existing.record.scope != request.scope {
+        if let Some(existing) = state.threads.get_mut(&thread_id) {
+            if existing.record.scope != scope {
                 return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+            }
+            if let Some(title) = title
+                && existing.record.title.as_deref() != Some(title.as_str())
+            {
+                existing.record.title = Some(title);
+            }
+            if let Some(metadata_json) = metadata_json
+                && existing.record.metadata_json.as_deref() != Some(metadata_json.as_str())
+            {
+                existing.record.metadata_json = Some(metadata_json);
             }
             return Ok(existing.record.clone());
         }
 
         let now = Utc::now();
         let record = SessionThreadRecord {
-            scope: request.scope,
+            scope,
             thread_id: thread_id.clone(),
-            created_by_actor_id: request.created_by_actor_id,
-            title: request.title,
-            metadata_json: request.metadata_json,
+            created_by_actor_id,
+            title,
+            metadata_json,
             goal: None,
             created_at: Some(now),
             updated_at: Some(now),

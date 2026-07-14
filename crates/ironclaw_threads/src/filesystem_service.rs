@@ -654,19 +654,54 @@ where
         &self,
         request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError> {
-        let thread_id = match request.thread_id {
+        let EnsureThreadRequest {
+            scope,
+            thread_id,
+            created_by_actor_id,
+            title,
+            metadata_json,
+        } = request;
+        let thread_id = match thread_id {
             Some(id) => id,
             None => generated_thread_id()?,
         };
-        let path = thread_record_path(&request.scope, &thread_id)?;
+        let path = thread_record_path(&scope, &thread_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        if let Some((existing, _)) = self
-            .read_thread_versioned(&request.scope, &thread_id)
-            .await?
-        {
-            if existing.record.scope != request.scope {
+        if let Some((mut existing, version)) = self.read_thread_versioned(&scope, &thread_id).await? {
+            if existing.record.scope != scope {
                 return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
+            }
+            let mut changed = false;
+            if let Some(title) = title
+                && existing.record.title.as_deref() != Some(title.as_str())
+            {
+                existing.record.title = Some(title);
+                changed = true;
+            }
+            if let Some(metadata_json) = metadata_json
+                && existing.record.metadata_json.as_deref() != Some(metadata_json.as_str())
+            {
+                existing.record.metadata_json = Some(metadata_json);
+                changed = true;
+            }
+            if changed {
+                let entry = Self::thread_entry(&existing)?;
+                put_with_cas(
+                    self.filesystem.as_ref(),
+                    &scope.to_resource_scope(),
+                    &path,
+                    entry,
+                    CasExpectation::Version(version),
+                )
+                .await
+                .map_err(|error| match error {
+                    PutError::VersionMismatch => SessionThreadError::Backend(format!(
+                        "filesystem CAS version mismatch updating thread title/metadata at {}",
+                        path.as_str()
+                    )),
+                    PutError::Other(error) => error,
+                })?;
             }
             return Ok(existing.record);
         }
@@ -679,11 +714,11 @@ where
         // path uniqueness — a sibling scope cannot create the same path.
         let now = Utc::now();
         let record = SessionThreadRecord {
-            scope: request.scope,
+            scope,
             thread_id: thread_id.clone(),
-            created_by_actor_id: request.created_by_actor_id,
-            title: request.title,
-            metadata_json: request.metadata_json,
+            created_by_actor_id,
+            title,
+            metadata_json,
             goal: None,
             created_at: Some(now),
             updated_at: Some(now),

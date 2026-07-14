@@ -1,7 +1,7 @@
 # Nextcloud Talk Fake-User Contract
 
 Status: active
-Last updated: 2026-07-09
+Last updated: 2026-07-14
 Scope: native Nextcloud Talk channel path (fake-user auth), inbound webhook to outbound chat delivery.
 
 ## Inbound Contract
@@ -37,8 +37,9 @@ Ingress behavior:
 3. In bridge signature mode, stale timestamp or replay nonce is rejected with HTTP 401.
 4. Ignore bot-authored events and non-Create events with HTTP 200 (no-op).
 5. Process every non-empty user-authored `Create` message as an inbound chat turn.
-6. If the message includes the configured `@<bot_display_name>` token, strip that token before submitting the prompt; otherwise preserve the original text.
+6. Before submit, sanitize leading addressing: strip configured bot display/handle prefixes and leading `@...` mention tokens from the start of the message.
 7. Submit the accepted inbound workflow as `direct_chat` and return HTTP 200 immediately.
+8. On every accepted event, sync the Ironclaw thread title to the Nextcloud room name when present in payload fields (`target.name`/`target.displayName`/`target.roomName` aliases and object-level fallbacks).
 
 ## Outbound Contract
 
@@ -69,6 +70,7 @@ replyTo behavior:
 - Only Completed runs are delivered.
 - Failed/Cancelled/non-terminal-aborted flows do not post outbound replies.
 - Non-2xx outbound statuses are treated as delivery failure.
+- Delivery binding lookup uses Direct route first with Shared fallback for legacy bindings.
 - Retry classification:
   - retryable: 429 and 5xx
   - permanent: remaining non-2xx statuses

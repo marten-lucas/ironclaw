@@ -127,7 +127,7 @@ impl Guest for NextcloudTalkAdapter {
                 return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
             }
 
-            let prompt = strip_mention(&rendered, DEFAULT_BOT_NAME);
+            let prompt = sanitize_prompt(&rendered, DEFAULT_BOT_NAME);
             let text = if prompt.is_empty() { rendered } else { prompt };
             build_user_message_inbound(&event, room_token, text)?
         };
@@ -409,11 +409,67 @@ fn mention_token(bot_name: &str) -> Option<String> {
     Some(format!("@{trimmed}"))
 }
 
-fn strip_mention(text: &str, bot_name: &str) -> String {
-    let Some(token) = mention_token(bot_name) else {
-        return text.trim().to_string();
-    };
-    text.replace(&token, "").trim().to_string()
+fn sanitize_prompt(text: &str, bot_name: &str) -> String {
+    let stripped_bot_prefix = strip_leading_bot_addressing(text, bot_name);
+    let stripped_mentions = strip_leading_mentions(&stripped_bot_prefix);
+    strip_leading_bot_addressing(&stripped_mentions, bot_name)
+        .trim()
+        .to_string()
+}
+
+fn strip_leading_bot_addressing(text: &str, bot_name: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut prefixes = Vec::new();
+    if let Some(token) = mention_token(bot_name) {
+        prefixes.push(token);
+    }
+    let normalized = bot_name.trim().replace(['_', '-'], " ");
+    if !normalized.trim().is_empty() {
+        prefixes.push(normalized.trim().to_string());
+    }
+
+    for prefix in prefixes {
+        if let Some(stripped) = strip_prefix_case_insensitive(trimmed, &prefix) {
+            return stripped
+                .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | ',' | '-'))
+                .trim()
+                .to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn strip_leading_mentions(text: &str) -> String {
+    let mut current = text.trim();
+    loop {
+        let Some(rest) = current.strip_prefix('@') else {
+            break;
+        };
+        let boundary = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        current = rest[boundary..].trim_start();
+        if current.is_empty() {
+            break;
+        }
+    }
+    current.to_string()
+}
+
+fn strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix_len = prefix.len();
+    if value.len() < prefix_len {
+        return None;
+    }
+    let head = value.get(..prefix_len)?;
+    if head.eq_ignore_ascii_case(prefix) {
+        value.get(prefix_len..)
+    } else {
+        None
+    }
 }
 
 export!(NextcloudTalkAdapter);
@@ -430,7 +486,11 @@ mod tests {
 
     #[test]
     fn strips_mentions() {
-        assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
+        assert_eq!(sanitize_prompt("@ironclaw hello", "ironclaw"), "hello");
+        assert_eq!(
+            sanitize_prompt("@KI Gerda @ki_assistant Hallo", "KI Gerda"),
+            "Hallo"
+        );
     }
 
     #[test]

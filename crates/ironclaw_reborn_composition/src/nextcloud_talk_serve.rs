@@ -43,6 +43,7 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolveBindingRequest,
     StaticProductInstallationResolver,
 };
 use ironclaw_secrets::{SecretStore, SecretStoreError};
@@ -63,6 +64,7 @@ use crate::product_auth_runtime_credentials::{
 use crate::webui_serve::PublicRouteMount;
 use ironclaw_product_adapters::{DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle};
 use ironclaw_wasm_product_adapters::EgressPolicy;
+use ironclaw_threads::EnsureThreadRequest;
 
 const NEXTCLOUD_SIGNATURE_HEADER: &str = "X-Nextcloud-Talk-Signature";
 const NEXTCLOUD_RANDOM_HEADER: &str = "X-Nextcloud-Talk-Random";
@@ -176,12 +178,13 @@ pub async fn build_nextcloud_talk_route_mount(
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
 
     let workflow_binding = binding.clone();
+    let thread_service = runtime.webui_thread_service();
     let delivery_binding: Arc<dyn ironclaw_product_workflow::ConversationBindingService> =
         Arc::new(binding.clone());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding,
-        runtime.webui_thread_service(),
+        Arc::clone(&thread_service),
         runtime.webui_turn_coordinator(),
     ));
     let workflow: Arc<dyn ProductWorkflow> = Arc::new(DefaultProductWorkflow::new(
@@ -228,8 +231,8 @@ pub async fn build_nextcloud_talk_route_mount(
         ));
         let driver = NextcloudTalkFinalReplyDriver::new(
             runtime.webui_turn_coordinator(),
-            runtime.webui_thread_service(),
-            delivery_binding,
+            Arc::clone(&thread_service),
+            Arc::clone(&delivery_binding),
             egress,
         );
         Some((Arc::new(driver), nextcloud_host, app_password_handle))
@@ -250,6 +253,8 @@ pub async fn build_nextcloud_talk_route_mount(
         agent_id: config.agent_id,
         project_id: config.project_id,
         user_id: config.user_id,
+        thread_service,
+        binding_service: delivery_binding,
         delivery_driver,
         replay_guard: Arc::new(Mutex::new(ReplayGuard::new())),
     };
@@ -287,6 +292,8 @@ struct NextcloudTalkRouteState {
     agent_id: AgentId,
     project_id: Option<ProjectId>,
     user_id: UserId,
+    thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
+    binding_service: Arc<dyn ironclaw_product_workflow::ConversationBindingService>,
     /// Outbound delivery driver: (driver, nextcloud_host, credential_handle).
     /// `None` when no Nextcloud host is configured (inbound-only mode).
     delivery_driver: Option<(
@@ -397,6 +404,11 @@ struct TalkObject {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
+    #[serde(alias = "name")]
+    #[serde(alias = "displayName")]
+    #[serde(alias = "display_name")]
+    room_name: Option<String>,
+    #[serde(default)]
     content: Option<String>,
 }
 
@@ -404,6 +416,18 @@ struct TalkObject {
 struct TalkTarget {
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "name")]
+    #[serde(alias = "displayName")]
+    #[serde(alias = "display_name")]
+    #[serde(alias = "roomName")]
+    #[serde(alias = "room_name")]
+    room_name: Option<String>,
+}
+
+struct ParsedTalkInbound {
+    inbound: ParsedProductInbound,
+    room_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,7 +541,7 @@ async fn nextcloud_talk_handler(
                 .into_response();
         }
     };
-    let envelope = match ProductInboundEnvelope::from_trusted_parse(context, parsed) {
+    let envelope = match ProductInboundEnvelope::from_trusted_parse(context, parsed.inbound) {
         Ok(value) => value,
         Err(_) => {
             return (
@@ -532,6 +556,18 @@ async fn nextcloud_talk_handler(
 
     match state.workflow.submit_inbound(envelope.clone()).await {
         Ok(ack) => {
+            if let Some(room_name) = parsed.room_name.as_deref()
+                && let Err(error) = sync_thread_title_with_room_name(&state, &envelope, room_name).await
+            {
+                tracing::warn!(
+                    target = "ironclaw::reborn::nextcloud_talk",
+                    webhook_path = %state.webhook_path,
+                    room_name,
+                    error = %error,
+                    "nextcloud talk room-name sync skipped"
+                );
+            }
+
             // If a delivery driver is wired and the turn was accepted, spawn
             // an async task to poll for completion and post the reply back.
             if let Some((driver, nextcloud_host, app_password_handle)) = &state.delivery_driver
@@ -571,6 +607,72 @@ async fn nextcloud_talk_handler(
                 .into_response()
         }
     }
+}
+
+async fn sync_thread_title_with_room_name(
+    state: &NextcloudTalkRouteState,
+    envelope: &ProductInboundEnvelope,
+    room_name: &str,
+) -> Result<(), ProductWorkflowError> {
+    let room_name = room_name.trim();
+    if room_name.is_empty() {
+        return Ok(());
+    }
+
+    let binding = match state
+        .binding_service
+        .lookup_binding(ResolveBindingRequest {
+            adapter_id: envelope.adapter_id().clone(),
+            installation_id: envelope.installation_id().clone(),
+            external_actor_ref: envelope.external_actor_ref().clone(),
+            external_conversation_ref: envelope.external_conversation_ref().clone(),
+            external_event_id: envelope.external_event_id().clone(),
+            route_kind: ironclaw_product_workflow::ProductConversationRouteKind::Direct,
+            auth_claim: envelope.auth_claim().clone(),
+        })
+        .await
+    {
+        Ok(binding) => binding,
+        Err(_) => state
+            .binding_service
+            .lookup_binding(ResolveBindingRequest {
+                adapter_id: envelope.adapter_id().clone(),
+                installation_id: envelope.installation_id().clone(),
+                external_actor_ref: envelope.external_actor_ref().clone(),
+                external_conversation_ref: envelope.external_conversation_ref().clone(),
+                external_event_id: envelope.external_event_id().clone(),
+                route_kind: ironclaw_product_workflow::ProductConversationRouteKind::Shared,
+                auth_claim: envelope.auth_claim().clone(),
+            })
+            .await?,
+    };
+
+    let Some(agent_id) = binding.agent_id.clone() else {
+        return Ok(());
+    };
+    let scope = ironclaw_threads::ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id,
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone().or(Some(binding.actor_user_id.clone())),
+        mission_id: None,
+    };
+
+    state
+        .thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope,
+            thread_id: Some(binding.thread_id.clone()),
+            created_by_actor_id: binding.actor_user_id.as_str().to_string(),
+            title: Some(room_name.to_string()),
+            metadata_json: None,
+        })
+        .await
+        .map_err(|error| ProductWorkflowError::Transient {
+            reason: format!("failed to sync nextcloud room title: {error}"),
+        })?;
+
+    Ok(())
 }
 
 async fn resolve_nextcloud_webhook_secret(
@@ -765,7 +867,7 @@ fn normalize_nextcloud_signature(signature: &str) -> Option<String> {
 fn parse_talk_event(
     event: &TalkEvent,
     bot_name: &str,
-) -> Result<Option<ParsedProductInbound>, ProductWorkflowError> {
+) -> Result<Option<ParsedTalkInbound>, ProductWorkflowError> {
     if event.event_type != "Create" || is_bot_authored(event) {
         return Ok(None);
     }
@@ -794,7 +896,7 @@ fn parse_talk_event(
         return Ok(None);
     }
 
-    let prompt = strip_mention(&rendered, bot_name);
+    let prompt = sanitize_prompt(&rendered, bot_name);
     let text = if prompt.is_empty() { rendered } else { prompt };
     let message_id = event
         .object
@@ -837,7 +939,10 @@ fn parse_talk_event(
         reason: error.to_string(),
     })?;
 
-    Ok(Some(parsed))
+    Ok(Some(ParsedTalkInbound {
+        inbound: parsed,
+        room_name: extract_room_name(event),
+    }))
 }
 
 fn extract_room_token(event: &TalkEvent) -> Option<String> {
@@ -850,6 +955,19 @@ fn extract_room_token(event: &TalkEvent) -> Option<String> {
                 .object
                 .as_ref()
                 .and_then(|value| non_empty_trimmed(value.id.as_deref()))
+        })
+}
+
+fn extract_room_name(event: &TalkEvent) -> Option<String> {
+    event
+        .target
+        .as_ref()
+        .and_then(|value| non_empty_trimmed(value.room_name.as_deref()))
+        .or_else(|| {
+            event
+                .object
+                .as_ref()
+                .and_then(|value| non_empty_trimmed(value.room_name.as_deref()))
         })
 }
 
@@ -892,11 +1010,67 @@ fn mention_token(bot_name: &str) -> Option<String> {
     Some(format!("@{trimmed}"))
 }
 
-fn strip_mention(text: &str, bot_name: &str) -> String {
-    let Some(token) = mention_token(bot_name) else {
-        return text.trim().to_string();
-    };
-    text.replace(&token, "").trim().to_string()
+fn sanitize_prompt(text: &str, bot_name: &str) -> String {
+    let stripped_bot_prefix = strip_leading_bot_addressing(text, bot_name);
+    let stripped_mentions = strip_leading_mentions(&stripped_bot_prefix);
+    strip_leading_bot_addressing(&stripped_mentions, bot_name)
+        .trim()
+        .to_string()
+}
+
+fn strip_leading_bot_addressing(text: &str, bot_name: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut prefixes = Vec::new();
+    if let Some(token) = mention_token(bot_name) {
+        prefixes.push(token);
+    }
+    let normalized = bot_name.trim().replace(['_', '-'], " ");
+    if !normalized.trim().is_empty() {
+        prefixes.push(normalized.trim().to_string());
+    }
+
+    for prefix in prefixes {
+        if let Some(stripped) = strip_prefix_case_insensitive(trimmed, &prefix) {
+            return stripped
+                .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | ',' | '-'))
+                .trim()
+                .to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn strip_leading_mentions(text: &str) -> String {
+    let mut current = text.trim();
+    loop {
+        let Some(rest) = current.strip_prefix('@') else {
+            break;
+        };
+        let boundary = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        current = rest[boundary..].trim_start();
+        if current.is_empty() {
+            break;
+        }
+    }
+    current.to_string()
+}
+
+fn strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix_len = prefix.len();
+    if value.len() < prefix_len {
+        return None;
+    }
+    let head = value.get(..prefix_len)?;
+    if head.eq_ignore_ascii_case(prefix) {
+        value.get(prefix_len..)
+    } else {
+        None
+    }
 }
 
 struct StaticNextcloudActorResolver {
@@ -967,20 +1141,25 @@ mod tests {
     }
 
     #[test]
-    fn strip_mention_only_removes_explicit_token() {
-        assert_eq!(strip_mention("@ironclaw hello", "ironclaw"), "hello");
+    fn sanitize_prompt_strips_configured_addressing() {
+        assert_eq!(sanitize_prompt("@ironclaw hello", "ironclaw"), "hello");
+        assert_eq!(sanitize_prompt("ironclaw hello", "ironclaw"), "hello");
+    }
+
+    #[test]
+    fn sanitize_prompt_removes_leading_mentions_and_configured_name() {
         assert_eq!(
-            strip_mention("ironclaw hello", "ironclaw"),
-            "ironclaw hello"
+            sanitize_prompt("@KI Gerda @ki_assistant Hallo", "KI Gerda"),
+            "Hallo"
         );
     }
 
     fn assert_user_message_payload(
-        parsed: ParsedProductInbound,
+        parsed: ParsedTalkInbound,
         expected_text: &str,
         expected_trigger: ProductTriggerReason,
     ) {
-        match parsed.payload {
+        match parsed.inbound.payload {
             ProductInboundPayload::UserMessage(payload) => {
                 assert_eq!(payload.text, expected_text);
                 assert_eq!(payload.trigger, expected_trigger);
@@ -1000,10 +1179,12 @@ mod tests {
             }),
             object: Some(TalkObject {
                 id: Some("42".to_string()),
+                room_name: None,
                 content: Some("@ironclaw please summarize this".to_string()),
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
+                room_name: None,
             }),
         };
 
@@ -1028,10 +1209,12 @@ mod tests {
             }),
             object: Some(TalkObject {
                 id: Some("42".to_string()),
+                room_name: None,
                 content: Some("please summarize this".to_string()),
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
+                room_name: None,
             }),
         };
 
@@ -1056,10 +1239,12 @@ mod tests {
             }),
             object: Some(TalkObject {
                 id: Some(" ".to_string()),
+                room_name: None,
                 content: Some("test 12:16".to_string()),
             }),
             target: Some(TalkTarget {
                 id: Some("3pjrvc7d".to_string()),
+                room_name: None,
             }),
         };
 
@@ -1068,17 +1253,20 @@ mod tests {
             .expect("blank actor/message ids should fall back instead of failing");
 
         assert_eq!(
-            parsed.external_event_id.as_str(),
+            parsed.inbound.external_event_id.as_str(),
             "create:3pjrvc7d:unknown-actor"
         );
-        assert_eq!(parsed.external_actor_ref.id(), "unknown-actor");
-        assert_eq!(parsed.external_actor_ref.display_name(), Some("Vorstand"));
+        assert_eq!(parsed.inbound.external_actor_ref.id(), "unknown-actor");
         assert_eq!(
-            parsed.external_conversation_ref.conversation_id(),
+            parsed.inbound.external_actor_ref.display_name(),
+            Some("Vorstand")
+        );
+        assert_eq!(
+            parsed.inbound.external_conversation_ref.conversation_id(),
             "3pjrvc7d"
         );
         assert_eq!(
-            parsed.external_conversation_ref.reply_target_message_id(),
+            parsed.inbound.external_conversation_ref.reply_target_message_id(),
             None
         );
         assert_user_message_payload(parsed, "test 12:16", ProductTriggerReason::DirectChat);
@@ -1095,10 +1283,12 @@ mod tests {
             }),
             object: Some(TalkObject {
                 id: Some("42".to_string()),
+                room_name: None,
                 content: Some("@ironclaw loop me".to_string()),
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
+                room_name: None,
             }),
         };
 
