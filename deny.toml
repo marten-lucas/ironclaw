@@ -33,6 +33,14 @@ ignore = [
     # so this destination-permission bypass is not reachable from our surface.
     # Remove once the wasmtime stack is upgraded to a patched release.
     "RUSTSEC-2026-0188",
+    # crossbeam-epoch pointer formatting UB in fmt::Pointer (RUSTSEC-2026-0204).
+    # This is currently transitive via termimad/crossbeam; remove after dependency
+    # graph upgrades to crossbeam-epoch >=0.9.20.
+    "RUSTSEC-2026-0204",
+    # lopdf stack overflow on deeply nested objects (RUSTSEC-2026-0187).
+    # Currently transitive via pdf-extract; remove once pdf-extract/lopdf stack is
+    # upgraded to a patched release.
+    "RUSTSEC-2026-0187",
 ]
 
 [licenses]

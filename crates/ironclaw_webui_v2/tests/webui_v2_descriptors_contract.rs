@@ -508,7 +508,7 @@ fn expected_table() -> Vec<Expected> {
         Expected {
             route_id: WEBUI_V2_ROUTE_TEST_EXTENSION_CONNECTION,
             method: NetworkMethod::Post,
-            pattern: "/api/webchat/v2/extensions/{package_id}/connection-test",
+            pattern: "/api/webchat/v2/extensions/{package_id}/setup/test-connection",
             listener_class: ListenerClass::LocalGateway,
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,

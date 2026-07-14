@@ -497,6 +497,26 @@ fn reply_to_message_id(
         .unwrap_or(0)
 }
 
+#[async_trait]
+impl NextcloudEgressCredentialProvider for RuntimeCredentialNextcloudEgressProvider {
+    async fn resolve_nextcloud_egress_credential(
+        &self,
+        handle: &EgressCredentialHandle,
+    ) -> Result<NextcloudEgressCredential, NextcloudEgressCredentialError> {
+        if handle.as_str() != "nextcloud_talk_app_password" {
+            return Err(NextcloudEgressCredentialError::UnknownHandle {
+                handle: handle.as_str().to_string(),
+            });
+        }
+        let username = self.resolve_secret("nextcloud_talk_bot_username").await?;
+        let app_password = self.resolve_secret("nextcloud_talk_app_password").await?;
+        Ok(NextcloudEgressCredential::basic_auth(
+            username,
+            app_password,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ironclaw_product_adapters::ExternalConversationRef;
@@ -556,25 +576,5 @@ mod tests {
         let long = "a".repeat(260);
         let excerpt = body_excerpt_bytes(long.as_bytes());
         assert!(excerpt.ends_with("..."));
-    }
-}
-
-#[async_trait]
-impl NextcloudEgressCredentialProvider for RuntimeCredentialNextcloudEgressProvider {
-    async fn resolve_nextcloud_egress_credential(
-        &self,
-        handle: &EgressCredentialHandle,
-    ) -> Result<NextcloudEgressCredential, NextcloudEgressCredentialError> {
-        if handle.as_str() != "nextcloud_talk_app_password" {
-            return Err(NextcloudEgressCredentialError::UnknownHandle {
-                handle: handle.as_str().to_string(),
-            });
-        }
-        let username = self.resolve_secret("nextcloud_talk_bot_username").await?;
-        let app_password = self.resolve_secret("nextcloud_talk_app_password").await?;
-        Ok(NextcloudEgressCredential::basic_auth(
-            username,
-            app_password,
-        ))
     }
 }

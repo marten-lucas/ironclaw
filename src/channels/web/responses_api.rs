@@ -1676,25 +1676,13 @@ pub async fn create_response_handler(
             response_timeout: resolve_response_timeout(req.timeout_sec),
         };
         if stream {
-            return handle_streaming(
-                state,
-                resume_msg,
-                resp_id,
-                model,
-                context,
-            )
-            .await
-            .map(IntoResponse::into_response);
+            return handle_streaming(state, resume_msg, resp_id, model, context)
+                .await
+                .map(IntoResponse::into_response);
         } else {
-            return handle_non_streaming(
-                state,
-                resume_msg,
-                resp_id,
-                model,
-                context,
-            )
-            .await
-            .map(IntoResponse::into_response);
+            return handle_non_streaming(state, resume_msg, resp_id, model, context)
+                .await
+                .map(IntoResponse::into_response);
         }
     }
 
@@ -1747,15 +1735,9 @@ pub async fn create_response_handler(
     };
 
     if stream {
-        handle_streaming(
-            state,
-            msg,
-            resp_id,
-            model,
-            context,
-        )
-        .await
-        .map(IntoResponse::into_response)
+        handle_streaming(state, msg, resp_id, model, context)
+            .await
+            .map(IntoResponse::into_response)
     } else {
         handle_non_streaming_with_fresh_thread_fallback(
             state,

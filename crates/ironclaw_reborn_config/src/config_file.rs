@@ -589,7 +589,7 @@ pub enum RebornConfigFileUpdateError {
     #[error("parse Reborn config `{}` as TOML: {source}", path.display())]
     Parse {
         path: PathBuf,
-        source: toml_edit::TomlError,
+        source: Box<toml_edit::TomlError>,
     },
     #[error("validate Reborn config `{}`: {source}", path.display())]
     Validate {
@@ -1011,7 +1011,7 @@ fn load_edit_document(path: &Path) -> Result<toml_edit::DocumentMut, RebornConfi
         Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|source| {
             RebornConfigFileUpdateError::Parse {
                 path: path.to_path_buf(),
-                source,
+                source: Box::new(source),
             }
         }),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {

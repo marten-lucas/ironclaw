@@ -787,7 +787,7 @@ pub(crate) async fn extensions_setup_test_connection_handler(
             format!("Invalid extension name: {e}"),
         )
     })?;
-    if name.as_str() != "nextcloud-talk" {
+    if name.as_str() != "nextcloud_talk" {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
             "Connection tests are only implemented for nextcloud-talk".to_string(),
