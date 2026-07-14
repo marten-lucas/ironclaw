@@ -7,7 +7,7 @@
   "auth": {
     "secret_name": "nextcloud_talk_base_url",
     "display_name": "Nextcloud Talk",
-    "instructions": "Configure Nextcloud base URL, fake-user username, app password, and optional webhook signature secret in the IronClaw extension setup UI.",
+    "instructions": "Configure Nextcloud base URL, fake-user ID (login username), fake-user display name, app password, and optional webhook signature secret in the IronClaw extension setup UI.",
     "setup_url": "https://nextcloud.com/talk/",
     "token_hint": "Configure all Nextcloud channel credentials in the IronClaw extension setup UI"
   },
@@ -20,7 +20,7 @@
       },
       {
         "name": "nextcloud_talk_bot_username",
-        "prompt": "Nextcloud fake-user username",
+        "prompt": "Nextcloud fake-user ID (login username, e.g. ki_assistent)",
         "optional": false
       },
       {
@@ -35,7 +35,7 @@
       },
       {
         "name": "nextcloud_talk_bot_display_name",
-        "prompt": "Optional display name used for mention matching (default: ironclaw)",
+        "prompt": "Fake-user display name used for mention matching (e.g. KI Gerda)",
         "optional": true
       }
     ],

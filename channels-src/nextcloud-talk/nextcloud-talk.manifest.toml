@@ -36,6 +36,9 @@ handle = "nextcloud_talk_bot_username"
 [[product_adapter.inbound.required_credentials]]
 handle = "nextcloud_talk_app_password"
 
+[[product_adapter.inbound.required_credentials]]
+handle = "nextcloud_talk_bot_display_name"
+
 [[product_adapter.inbound.egress]]
 host = "next.cloud.kiga-gramschatz.de"
 credential_handle = "nextcloud_talk_app_password"

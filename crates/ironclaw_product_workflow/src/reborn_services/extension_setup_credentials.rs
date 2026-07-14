@@ -290,10 +290,11 @@ fn field_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String
         return "Nextcloud base URL (example: https://cloud.example.tld)".to_string();
     }
     if requirement.provider == "nextcloud_talk_bot_username" {
-        return "Nextcloud fake-user username".to_string();
+        return "Nextcloud fake-user ID (login username, e.g. ki_assistent)".to_string();
     }
     if requirement.provider == "nextcloud_talk_bot_display_name" {
-        return "Bot display name used for exact mentions (default: ironclaw)".to_string();
+        return "Fake-user display name used for mention matching (mention_display_name, e.g. KI Gerda)"
+            .to_string();
     }
     requirement.name.clone()
 }

@@ -17,6 +17,7 @@ Expected payload shape (subset):
 - object.id: optional string (message id)
 - object.content: string (raw or JSON-encoded message content)
 - target.id: optional string (room token)
+- mention.userId: optional string (declared reply user id from bridge payload)
 - bridgeMessage.raw: optional string (original raw text from Nextcloud event)
 - bridgeMessage.mentionEntities: optional array of mention descriptors
   - token: mention token string as it appeared in message (for example `@KI Gerda`)
@@ -41,9 +42,10 @@ Ingress behavior:
 3. In bridge signature mode, stale timestamp or replay nonce is rejected with HTTP 401.
 4. Ignore bot-authored events and non-Create events with HTTP 200 (no-op).
 5. Process every non-empty user-authored `Create` message as an inbound chat turn.
-6. Before submit, strip mention entities marked with `bridgeMessage.mentionEntities[].isBot=true`, then apply fallback leading-address sanitization.
-7. Submit the accepted inbound workflow as `direct_chat` and return HTTP 200 immediately.
-8. On every accepted event, sync the Ironclaw thread title to the Nextcloud room name when present in payload fields (`target.name`/`target.displayName`/`target.roomName` aliases and object-level fallbacks).
+6. If `mention.userId` is present, require it to match configured `nextcloud_talk_bot_username` (case-insensitive, optional leading `@` ignored); reject mismatch with HTTP 400.
+7. Before submit, strip mention entities marked with `bridgeMessage.mentionEntities[].isBot=true`, then apply fallback leading-address sanitization.
+8. Submit the accepted inbound workflow as `direct_chat` and return HTTP 200 immediately.
+9. On every accepted event, sync the Ironclaw thread title to the Nextcloud room name when present in payload fields (`target.name`/`target.displayName`/`target.roomName` aliases and object-level fallbacks).
 
 ## Outbound Contract
 

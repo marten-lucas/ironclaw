@@ -387,8 +387,18 @@ struct TalkEvent {
     #[serde(default)]
     target: Option<TalkTarget>,
     #[serde(default)]
+    mention: Option<TalkMention>,
+    #[serde(default)]
     #[serde(rename = "bridgeMessage")]
     bridge_message: Option<TalkBridgeMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TalkMention {
+    #[serde(default)]
+    #[serde(rename = "userId")]
+    #[serde(alias = "user_id")]
+    user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -516,6 +526,10 @@ async fn nextcloud_talk_handler(
                 .into_response();
         }
     };
+
+    if let Err(error) = validate_declared_reply_user(&state, &event).await {
+        return (StatusCode::BAD_REQUEST, Json(NextcloudErrorBody { error })).into_response();
+    }
 
     let parsed = match parse_talk_event(&event, &state.bot_name) {
         Ok(Some(value)) => value,
@@ -703,7 +717,20 @@ async fn sync_thread_title_with_room_name(
 async fn resolve_nextcloud_webhook_secret(
     state: &NextcloudTalkRouteState,
 ) -> Result<Option<String>, NextcloudSecretResolutionError> {
-    let provider = AuthProviderId::new("nextcloud_talk_webhook_secret")
+    resolve_nextcloud_manual_secret(state, "nextcloud_talk_webhook_secret").await
+}
+
+async fn resolve_nextcloud_bot_username(
+    state: &NextcloudTalkRouteState,
+) -> Result<Option<String>, NextcloudSecretResolutionError> {
+    resolve_nextcloud_manual_secret(state, "nextcloud_talk_bot_username").await
+}
+
+async fn resolve_nextcloud_manual_secret(
+    state: &NextcloudTalkRouteState,
+    provider_name: &str,
+) -> Result<Option<String>, NextcloudSecretResolutionError> {
+    let provider = AuthProviderId::new(provider_name)
         .map_err(|_| NextcloudSecretResolutionError::Backend)?;
     let scope = AuthProductScope::new(
         ResourceScope {
@@ -762,6 +789,38 @@ fn map_secret_store_error(error: SecretStoreError) -> NextcloudSecretResolutionE
         SecretStoreError::BackendMisconfigured { .. }
         | SecretStoreError::StoreUnavailable { .. } => NextcloudSecretResolutionError::Backend,
     }
+}
+
+async fn validate_declared_reply_user(
+    state: &NextcloudTalkRouteState,
+    event: &TalkEvent,
+) -> Result<(), &'static str> {
+    let Some(declared_reply_user) = extract_declared_reply_user_id(event) else {
+        return Ok(());
+    };
+
+    let configured_reply_user = resolve_nextcloud_bot_username(state)
+        .await
+        .map_err(|_| "reply_user_config_unavailable")?
+        .ok_or("reply_user_config_missing")?;
+
+    if normalized_user_id_matches(&declared_reply_user, &configured_reply_user) {
+        return Ok(());
+    }
+
+    Err("reply_user_mismatch")
+}
+
+fn extract_declared_reply_user_id(event: &TalkEvent) -> Option<String> {
+    event
+        .mention
+        .as_ref()
+        .and_then(|mention| non_empty_trimmed(mention.user_id.as_deref()))
+}
+
+fn normalized_user_id_matches(left: &str, right: &str) -> bool {
+    let normalize = |value: &str| value.trim().trim_start_matches('@').to_ascii_lowercase();
+    normalize(left) == normalize(right)
 }
 
 fn verify_nextcloud_signature(secret: &str, random: &str, body: &[u8], signature: &str) -> bool {
@@ -1276,6 +1335,7 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            mention: None,
             bridge_message: None,
         };
 
@@ -1307,6 +1367,7 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            mention: None,
             bridge_message: None,
         };
 
@@ -1338,6 +1399,7 @@ mod tests {
                 id: Some("3pjrvc7d".to_string()),
                 room_name: None,
             }),
+            mention: None,
             bridge_message: None,
         };
 
@@ -1383,6 +1445,7 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            mention: None,
             bridge_message: None,
         };
 
@@ -1408,6 +1471,7 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            mention: None,
             bridge_message: Some(TalkBridgeMessage {
                 raw: Some("@KI Gerda @ki_assistant Es ist 10:01. antworte mit OK".to_string()),
                 mention_entities: vec![
@@ -1521,5 +1585,30 @@ mod tests {
             BRIDGE_SIGNATURE_TOLERANCE_SECONDS,
         );
         assert_eq!(result, Err("stale_timestamp"));
+    }
+
+    #[test]
+    fn extract_declared_reply_user_id_reads_mention_user_id() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: None,
+            object: None,
+            target: None,
+            mention: Some(TalkMention {
+                user_id: Some("@ki_assistent".to_string()),
+            }),
+            bridge_message: None,
+        };
+
+        assert_eq!(
+            extract_declared_reply_user_id(&event).as_deref(),
+            Some("@ki_assistent")
+        );
+    }
+
+    #[test]
+    fn normalized_user_id_matches_ignores_case_and_prefix_at() {
+        assert!(normalized_user_id_matches("@KI_Assistent", "ki_assistent"));
+        assert!(!normalized_user_id_matches("ki_assistent", "andere_id"));
     }
 }
