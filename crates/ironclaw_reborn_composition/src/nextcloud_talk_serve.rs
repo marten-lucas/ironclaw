@@ -48,6 +48,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_secrets::{SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
+use serde_json::Value;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -514,7 +515,7 @@ async fn nextcloud_talk_handler(
         );
     }
 
-    let event = match serde_json::from_slice::<TalkEvent>(body.as_ref()) {
+    let event = match deserialize_talk_event(body.as_ref()) {
         Ok(value) => value,
         Err(_) => {
             return (
@@ -789,6 +790,41 @@ fn map_secret_store_error(error: SecretStoreError) -> NextcloudSecretResolutionE
         SecretStoreError::BackendMisconfigured { .. }
         | SecretStoreError::StoreUnavailable { .. } => NextcloudSecretResolutionError::Backend,
     }
+}
+
+fn deserialize_talk_event(body: &[u8]) -> Result<TalkEvent, ()> {
+    if let Ok(event) = serde_json::from_slice::<TalkEvent>(body) {
+        return Ok(event);
+    }
+
+    let value = serde_json::from_slice::<Value>(body).map_err(|_| ())?;
+
+    if let Value::String(inner_json) = &value {
+        return serde_json::from_str::<TalkEvent>(inner_json).map_err(|_| ());
+    }
+
+    if let Value::Object(map) = &value {
+        if let Some(Value::Object(payload)) = map.get("payload") {
+            return serde_json::from_value::<TalkEvent>(Value::Object(payload.clone()))
+                .map_err(|_| ());
+        }
+
+        if let Some(Value::String(inner_json)) = map.get("body")
+            && let Ok(event) = serde_json::from_str::<TalkEvent>(inner_json)
+        {
+            return Ok(event);
+        }
+
+        if map.get("type").is_none() && let Some(event_type) = map.get("eventType") {
+            let mut patched = map.clone();
+            patched.insert("type".to_string(), event_type.clone());
+            if let Ok(event) = serde_json::from_value::<TalkEvent>(Value::Object(patched)) {
+                return Ok(event);
+            }
+        }
+    }
+
+    Err(())
 }
 
 async fn validate_declared_reply_user(
@@ -1585,6 +1621,25 @@ mod tests {
             BRIDGE_SIGNATURE_TOLERANCE_SECONDS,
         );
         assert_eq!(result, Err("stale_timestamp"));
+    }
+
+    #[test]
+    fn deserialize_talk_event_accepts_double_encoded_json_string() {
+        let inner = r#"{"type":"Create","target":{"id":"room-1"},"object":{"content":"hallo"}}"#;
+        let body = format!("\"{}\"", inner.replace('"', "\\\""));
+
+        let parsed = deserialize_talk_event(body.as_bytes()).expect("parse wrapped payload");
+        assert_eq!(parsed.event_type, "Create");
+        assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
+    }
+
+    #[test]
+    fn deserialize_talk_event_accepts_event_type_alias() {
+        let body = br#"{"eventType":"Create","target":{"id":"room-1"},"object":{"content":"hallo"}}"#;
+
+        let parsed = deserialize_talk_event(body).expect("parse eventType alias payload");
+        assert_eq!(parsed.event_type, "Create");
+        assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
     }
 
     #[test]
