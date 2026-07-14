@@ -386,6 +386,9 @@ struct TalkEvent {
     object: Option<TalkObject>,
     #[serde(default)]
     target: Option<TalkTarget>,
+    #[serde(default)]
+    #[serde(rename = "bridgeMessage")]
+    bridge_message: Option<TalkBridgeMessage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,6 +426,28 @@ struct TalkTarget {
     #[serde(alias = "roomName")]
     #[serde(alias = "room_name")]
     room_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TalkBridgeMessage {
+    #[serde(default)]
+    raw: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "mentionEntities")]
+    mention_entities: Vec<TalkMentionEntity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TalkMentionEntity {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "isBot")]
+    is_bot: bool,
 }
 
 struct ParsedTalkInbound {
@@ -896,7 +921,7 @@ fn parse_talk_event(
         return Ok(None);
     }
 
-    let prompt = sanitize_prompt(&rendered, bot_name);
+    let prompt = sanitize_prompt_from_bridge_or_text(event, &rendered, bot_name);
     let text = if prompt.is_empty() { rendered } else { prompt };
     let message_id = event
         .object
@@ -1000,6 +1025,71 @@ fn parse_message_content(content: &str) -> String {
         return content_json.message.unwrap_or_default();
     }
     content.to_string()
+}
+
+fn sanitize_prompt_from_bridge_or_text(event: &TalkEvent, rendered: &str, bot_name: &str) -> String {
+    let bridge_raw = event
+        .bridge_message
+        .as_ref()
+        .and_then(|message| non_empty_trimmed(message.raw.as_deref()));
+    let source = bridge_raw.unwrap_or_else(|| rendered.to_string());
+    let from_entities = event
+        .bridge_message
+        .as_ref()
+        .map(|message| strip_bot_mention_entities(&source, &message.mention_entities))
+        .unwrap_or(source);
+    sanitize_prompt(&from_entities, bot_name)
+}
+
+fn strip_bot_mention_entities(text: &str, entities: &[TalkMentionEntity]) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    for entity in entities {
+        if !entity.is_bot {
+            continue;
+        }
+        if let Some(token) = non_empty_trimmed(entity.token.as_deref()) {
+            tokens.push(token);
+        }
+        if let Some(id) = non_empty_trimmed(entity.id.as_deref()) {
+            tokens.push(format!("@{id}"));
+        }
+        if let Some(name) = non_empty_trimmed(entity.name.as_deref()) {
+            tokens.push(format!("@{name}"));
+        }
+    }
+
+    tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+    tokens.dedup();
+
+    let mut result = text.to_string();
+    for token in tokens {
+        result = replace_case_insensitive(&result, &token);
+    }
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn replace_case_insensitive(haystack: &str, needle: &str) -> String {
+    if needle.trim().is_empty() {
+        return haystack.to_string();
+    }
+
+    let haystack_lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    let mut output = String::with_capacity(haystack.len());
+
+    while cursor < haystack.len() {
+        let tail = &haystack_lower[cursor..];
+        let Some(offset) = tail.find(&needle_lower) else {
+            output.push_str(&haystack[cursor..]);
+            break;
+        };
+        let start = cursor + offset;
+        output.push_str(&haystack[cursor..start]);
+        cursor = start + needle.len();
+    }
+
+    output
 }
 
 fn mention_token(bot_name: &str) -> Option<String> {
@@ -1186,6 +1276,7 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            bridge_message: None,
         };
 
         let parsed = parse_talk_event(&event, "ironclaw")
@@ -1216,6 +1307,7 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            bridge_message: None,
         };
 
         let parsed = parse_talk_event(&event, "ironclaw")
@@ -1246,6 +1338,7 @@ mod tests {
                 id: Some("3pjrvc7d".to_string()),
                 room_name: None,
             }),
+            bridge_message: None,
         };
 
         let parsed = parse_talk_event(&event, "ki_assistant")
@@ -1290,10 +1383,55 @@ mod tests {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
             }),
+            bridge_message: None,
         };
 
         let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
         assert!(parsed.is_none(), "bot-authored messages must be ignored");
+    }
+
+    #[test]
+    fn parse_talk_event_prefers_explicit_bridge_mention_entities() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("user-123".to_string()),
+                name: Some("Marten".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("901".to_string()),
+                room_name: None,
+                content: Some("@KI Gerda @ki_assistant Es ist 10:01. antworte mit OK".to_string()),
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-alpha".to_string()),
+                room_name: None,
+            }),
+            bridge_message: Some(TalkBridgeMessage {
+                raw: Some("@KI Gerda @ki_assistant Es ist 10:01. antworte mit OK".to_string()),
+                mention_entities: vec![
+                    TalkMentionEntity {
+                        token: Some("@KI Gerda".to_string()),
+                        id: None,
+                        name: None,
+                        is_bot: true,
+                    },
+                    TalkMentionEntity {
+                        token: Some("@ki_assistant".to_string()),
+                        id: None,
+                        name: None,
+                        is_bot: true,
+                    },
+                ],
+            }),
+        };
+
+        let parsed = parse_talk_event(&event, "KI Gerda")
+            .expect("parse result")
+            .expect("bridge mention entities should still produce inbound payload");
+
+        assert_user_message_payload(parsed, "Es ist 10:01. antworte mit OK", ProductTriggerReason::DirectChat);
     }
 
     #[test]
