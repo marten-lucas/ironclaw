@@ -9,7 +9,7 @@ const DEFAULT_WEBHOOK_PATH: &str = "/webhooks/nextcloud/talk";
 const DEFAULT_BOT_NAME: &str = "ironclaw";
 
 pub(crate) fn resolve_nextcloud_talk_config_for_serve(
-    nextcloud_section: Option<&NextcloudTalkSection>,
+    _nextcloud_section: Option<&NextcloudTalkSection>,
     tenant_id: &TenantId,
     default_agent_id: &AgentId,
     default_project_id: Option<&ProjectId>,
@@ -19,15 +19,10 @@ pub(crate) fn resolve_nextcloud_talk_config_for_serve(
     let extension_id = DEFAULT_EXTENSION_ID.to_string();
     let webhook_path = DEFAULT_WEBHOOK_PATH.to_string();
 
-    let bot_name = nextcloud_section
-        .and_then(|section| section.bot_name.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_BOT_NAME)
-        .to_string();
-    let nextcloud_host = nextcloud_section
-        .and_then(|section| section.base_url.clone())
-        .filter(|value| !value.trim().is_empty());
+    let bot_name = DEFAULT_BOT_NAME.to_string();
+    // Outbound host is resolved from extension setup credentials
+    // (`nextcloud_talk_base_url`) at runtime.
+    let nextcloud_host = None;
 
     let route_config = NextcloudTalkRouteConfig {
         tenant_id: tenant_id.clone(),
@@ -59,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_uses_configured_nextcloud_bot_name() {
+    fn resolve_ignores_configured_nextcloud_bot_name() {
         let nextcloud = NextcloudTalkSection {
             bot_name: Some("test".to_string()),
             ..Default::default()
@@ -76,7 +71,7 @@ mod tests {
         .expect("route config")
         .expect("nextcloud config");
 
-        assert_eq!(config.bot_name, "test");
+        assert_eq!(config.bot_name, DEFAULT_BOT_NAME);
     }
 
     #[test]

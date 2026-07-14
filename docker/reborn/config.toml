@@ -19,6 +19,9 @@ regex_activation_enabled = true
 env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
 env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 
+# Nextcloud Talk channel settings are sourced from Extension Setup UI
+# credentials (secret store), not from config.toml.
+
 [llm.default]
 provider_id = "nearai"
 model = "anthropic/claude-sonnet-4-5"

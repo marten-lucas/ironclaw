@@ -56,6 +56,7 @@ use serde::{
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use url::Url;
 
 use crate::RebornRuntime;
 use crate::nextcloud_delivery::{
@@ -94,8 +95,10 @@ pub struct NextcloudTalkRouteConfig {
     pub webhook_path: String,
     pub bot_name: String,
     /// Hostname of the Nextcloud instance (e.g. `next.cloud.example.tld`).
-    /// Used to construct outbound egress requests. When `None`, outbound
-    /// delivery is disabled and only inbound webhook parsing is active.
+    /// Deprecated for outbound delivery host resolution.
+    ///
+    /// Outbound host is resolved from the UI/setup credential
+    /// `nextcloud_talk_base_url` to keep a single source of truth.
     pub nextcloud_host: Option<String>,
 }
 
@@ -197,14 +200,20 @@ pub async fn build_nextcloud_talk_route_mount(
         Arc::new(workflow_binding),
     ));
 
-    // Build the outbound delivery driver if a Nextcloud host is configured.
-    let delivery_driver = if let Some(nextcloud_host_str) = config.nextcloud_host.clone() {
-        let nextcloud_host = DeclaredEgressHost::new(&nextcloud_host_str).map_err(|err| {
-            NextcloudTalkBuildError::InvalidConfig {
-                field: "nextcloud_host",
-                reason: err.to_string(),
-            }
-        })?;
+    // Build the outbound delivery driver if a Nextcloud host is configured,
+    // or if a setup-credential base URL can provide the host fallback.
+    let resolved_nextcloud_host = resolve_nextcloud_delivery_host_fallback(
+        Arc::clone(&runtime_credential_accounts),
+        Arc::clone(&secret_store),
+        requester_extension.clone(),
+        config.tenant_id.clone(),
+        config.agent_id.clone(),
+        config.project_id.clone(),
+        config.user_id.clone(),
+    )
+    .await?;
+
+    let delivery_driver = if let Some(nextcloud_host) = resolved_nextcloud_host {
         let app_password_handle = EgressCredentialHandle::new("nextcloud_talk_app_password")
             .map_err(|err| NextcloudTalkBuildError::InvalidConfig {
                 field: "nextcloud_talk_app_password",
@@ -581,7 +590,27 @@ async fn nextcloud_talk_handler(
         return (StatusCode::BAD_REQUEST, Json(NextcloudErrorBody { error })).into_response();
     }
 
-    let parsed = match parse_talk_event(&event, &state.bot_name) {
+    let resolved_bot_name = match resolve_nextcloud_bot_display_name(&state).await {
+        Ok(Some(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                state.bot_name.clone()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        Ok(None) | Err(NextcloudSecretResolutionError::Missing) => state.bot_name.clone(),
+        Err(NextcloudSecretResolutionError::Backend) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_talk",
+                webhook_path = %state.webhook_path,
+                "nextcloud_talk_bot_display_name unavailable from credential backend; using default parser bot name"
+            );
+            state.bot_name.clone()
+        }
+    };
+
+    let parsed = match parse_talk_event(&event, &resolved_bot_name) {
         Ok(Some(value)) => value,
         Ok(None) => return (StatusCode::OK, "ok").into_response(),
         Err(_) => {
@@ -770,24 +799,123 @@ async fn resolve_nextcloud_webhook_secret(
     resolve_nextcloud_manual_secret(state, "nextcloud_talk_webhook_secret").await
 }
 
+async fn resolve_nextcloud_delivery_host_fallback(
+    runtime_credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    secret_store: Arc<dyn SecretStore>,
+    requester_extension: ExtensionId,
+    tenant_id: TenantId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    user_id: UserId,
+) -> Result<Option<DeclaredEgressHost>, NextcloudTalkBuildError> {
+    let base_url = resolve_nextcloud_manual_secret_with_components(
+        Arc::clone(&runtime_credential_accounts),
+        Arc::clone(&secret_store),
+        requester_extension,
+        tenant_id,
+        agent_id,
+        project_id,
+        user_id,
+        "nextcloud_talk_base_url",
+    )
+    .await;
+
+    let Some(base_url) = base_url else {
+        tracing::warn!(
+            target = "ironclaw::reborn::nextcloud_talk",
+            "nextcloud talk delivery host is not configured and nextcloud_talk_base_url fallback is unavailable; outbound reply delivery remains disabled"
+        );
+        return Ok(None);
+    };
+
+    let parsed = match Url::parse(base_url.trim()) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_talk",
+                error = %error,
+                "nextcloud_talk_base_url fallback is invalid; outbound reply delivery remains disabled"
+            );
+            return Ok(None);
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        tracing::warn!(
+            target = "ironclaw::reborn::nextcloud_talk",
+            "nextcloud_talk_base_url fallback has no host; outbound reply delivery remains disabled"
+        );
+        return Ok(None);
+    };
+
+    let declared = match DeclaredEgressHost::new(host) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::nextcloud_talk",
+                error = %error,
+                "resolved fallback host is invalid for egress policy; outbound reply delivery remains disabled"
+            );
+            return Ok(None);
+        }
+    };
+
+    tracing::info!(
+        target = "ironclaw::reborn::nextcloud_talk",
+        nextcloud_host = %declared.as_str(),
+        "resolved Nextcloud delivery host from nextcloud_talk_base_url setup credential"
+    );
+
+    Ok(Some(declared))
+}
+
 async fn resolve_nextcloud_bot_username(
     state: &NextcloudTalkRouteState,
 ) -> Result<Option<String>, NextcloudSecretResolutionError> {
     resolve_nextcloud_manual_secret(state, "nextcloud_talk_bot_username").await
 }
 
+async fn resolve_nextcloud_bot_display_name(
+    state: &NextcloudTalkRouteState,
+) -> Result<Option<String>, NextcloudSecretResolutionError> {
+    resolve_nextcloud_manual_secret(state, "nextcloud_talk_bot_display_name").await
+}
+
 async fn resolve_nextcloud_manual_secret(
     state: &NextcloudTalkRouteState,
     provider_name: &str,
 ) -> Result<Option<String>, NextcloudSecretResolutionError> {
-    let provider = AuthProviderId::new(provider_name)
-        .map_err(|_| NextcloudSecretResolutionError::Backend)?;
+    resolve_nextcloud_manual_secret_with_components(
+        Arc::clone(&state.runtime_credential_accounts),
+        Arc::clone(&state.secret_store),
+        state.requester_extension.clone(),
+        state.tenant_id.clone(),
+        state.agent_id.clone(),
+        state.project_id.clone(),
+        state.user_id.clone(),
+        provider_name,
+    )
+    .await
+}
+
+async fn resolve_nextcloud_manual_secret_with_components(
+    runtime_credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    secret_store: Arc<dyn SecretStore>,
+    requester_extension: ExtensionId,
+    tenant_id: TenantId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    user_id: UserId,
+    provider_name: &str,
+) -> Result<Option<String>, NextcloudSecretResolutionError> {
+    let provider =
+        AuthProviderId::new(provider_name).map_err(|_| NextcloudSecretResolutionError::Backend)?;
     let scope = AuthProductScope::new(
         ResourceScope {
-            tenant_id: state.tenant_id.clone(),
-            user_id: state.user_id.clone(),
-            agent_id: Some(state.agent_id.clone()),
-            project_id: state.project_id.clone(),
+            tenant_id,
+            user_id,
+            agent_id: Some(agent_id),
+            project_id,
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
@@ -796,13 +924,12 @@ async fn resolve_nextcloud_manual_secret(
     );
     let selection_request = RuntimeCredentialAccountSelectionRequest::new(
         CredentialAccountSelectionRequest::new(scope.clone(), provider)
-            .for_extension(state.requester_extension.clone()),
+            .for_extension(requester_extension),
         scope,
         RuntimeCredentialAccountSetup::ManualToken,
         Vec::new(),
     );
-    let account = state
-        .runtime_credential_accounts
+    let account = runtime_credential_accounts
         .select_unique_configured_runtime_account(selection_request)
         .await
         .map_err(|error| match error {
@@ -815,13 +942,11 @@ async fn resolve_nextcloud_manual_secret(
     let Some(handle) = handle else {
         return Ok(None);
     };
-    let lease = state
-        .secret_store
+    let lease = secret_store
         .lease_once(&account.scope.resource, &handle)
         .await
         .map_err(map_secret_store_error)?;
-    let material = state
-        .secret_store
+    let material = secret_store
         .consume(&account.scope.resource, lease.id)
         .await
         .map_err(map_secret_store_error)?;
