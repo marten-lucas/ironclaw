@@ -23,6 +23,13 @@ Expected payload shape (subset):
   - token: mention token string as it appeared in message (for example `@KI Gerda`)
   - isBot: boolean (true when entity addresses configured fake user)
 
+Canonical producer shape (recommended):
+- Send only canonical keys: `type`, `actor`, `object`, `target`, `mention`, `bridgeMessage`.
+- Keep scalar fields as JSON strings; avoid numbers/objects in string slots.
+- Keep `bridgeMessage.mentionEntities` as an array of objects (never object/map).
+- Avoid alias keys in producer output (`eventType`, `user_id`, `room_name`, etc.).
+- Do not wrap payloads in extra envelopes (`payload`, `data`, `body`) when direct JSON can be sent.
+
 Host policy expectations:
 - Signature mode (preferred):
   - Header X-Nextcloud-Talk-Signature

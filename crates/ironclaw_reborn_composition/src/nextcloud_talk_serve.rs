@@ -49,7 +49,10 @@ use ironclaw_product_workflow::{
 use ironclaw_secrets::{SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeOwned, Deserializer},
+};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -380,85 +383,111 @@ struct NextcloudErrorBody {
 #[derive(Debug, Deserialize)]
 struct TalkEvent {
     #[serde(rename = "type")]
+    #[serde(alias = "eventType")]
     event_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_object")]
     actor: Option<TalkActor>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_object")]
     object: Option<TalkObject>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_object")]
     target: Option<TalkTarget>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_object")]
     mention: Option<TalkMention>,
-    #[serde(default)]
-    #[serde(rename = "bridgeMessage")]
+    #[serde(default, rename = "bridgeMessage", deserialize_with = "de_opt_object")]
     bridge_message: Option<TalkBridgeMessage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkMention {
-    #[serde(default)]
-    #[serde(rename = "userId")]
-    #[serde(alias = "user_id")]
+    #[serde(default, rename = "userId", alias = "user_id", deserialize_with = "de_opt_string")]
     user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkActor {
-    #[serde(default)]
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "de_opt_string")]
     actor_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkObject {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     id: Option<String>,
-    #[serde(default)]
-    #[serde(alias = "name")]
-    #[serde(alias = "displayName")]
-    #[serde(alias = "display_name")]
+    #[serde(default, alias = "name", alias = "displayName", alias = "display_name", deserialize_with = "de_opt_string")]
     room_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkTarget {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     id: Option<String>,
-    #[serde(default)]
-    #[serde(alias = "name")]
-    #[serde(alias = "displayName")]
-    #[serde(alias = "display_name")]
-    #[serde(alias = "roomName")]
-    #[serde(alias = "room_name")]
+    #[serde(default, alias = "name", alias = "displayName", alias = "display_name", alias = "roomName", alias = "room_name", deserialize_with = "de_opt_string")]
     room_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkBridgeMessage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     raw: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "mentionEntities")]
+    #[serde(default, rename = "mentionEntities", deserialize_with = "de_mention_entities")]
     mention_entities: Vec<TalkMentionEntity>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkMentionEntity {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     token: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_string")]
     name: Option<String>,
     #[serde(default)]
     #[serde(rename = "isBot")]
     is_bot: bool,
+}
+
+fn de_opt_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::String(inner)) => Some(inner),
+        _ => None,
+    })
+}
+
+fn de_opt_object<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Object(map)) => serde_json::from_value::<T>(Value::Object(map)).ok(),
+        _ => None,
+    })
+}
+
+fn de_mention_entities<'de, D>(deserializer: D) -> Result<Vec<TalkMentionEntity>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let Some(Value::Array(entries)) = value else {
+        return Ok(Vec::new());
+    };
+
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value::<TalkMentionEntity>(entry).ok())
+        .collect())
 }
 
 struct ParsedTalkInbound {
@@ -830,6 +859,10 @@ fn deserialize_talk_event(body: &[u8]) -> Result<TalkEvent, ()> {
     }
 
     if let Value::Object(map) = &value {
+        if let Some(event) = deserialize_talk_event_from_object_map(map) {
+            return Ok(event);
+        }
+
         if let Some(Value::Object(payload)) = map.get("payload") {
             return serde_json::from_value::<TalkEvent>(Value::Object(payload.clone()))
                 .map_err(|_| ());
@@ -869,6 +902,12 @@ fn deserialize_talk_event(body: &[u8]) -> Result<TalkEvent, ()> {
     }
 
     Err(())
+}
+
+fn deserialize_talk_event_from_object_map(
+    map: &serde_json::Map<String, Value>,
+) -> Option<TalkEvent> {
+    serde_json::from_value::<TalkEvent>(Value::Object(map.clone())).ok()
 }
 
 fn trim_utf8_bom_and_ws(mut body: &[u8]) -> &[u8] {
@@ -1781,6 +1820,15 @@ mod tests {
         let body = br#"{"payload":"{\"type\":\"Create\",\"target\":{\"id\":\"room-1\"},\"object\":{\"content\":\"hallo\"}}"}"#;
 
         let parsed = deserialize_talk_event(body).expect("parse payload string wrapper");
+        assert_eq!(parsed.event_type, "Create");
+        assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
+    }
+
+    #[test]
+    fn deserialize_talk_event_tolerates_malformed_bridge_mention_entities() {
+        let body = br#"{"type":"Create","target":{"id":"room-1"},"object":{"content":"hallo"},"bridgeMessage":{"raw":"@ki hallo","mentionEntities":{"bad":"shape"}}}"#;
+
+        let parsed = deserialize_talk_event(body).expect("parse payload despite malformed mentionEntities");
         assert_eq!(parsed.event_type, "Create");
         assert_eq!(extract_room_token(&parsed).as_deref(), Some("room-1"));
     }
