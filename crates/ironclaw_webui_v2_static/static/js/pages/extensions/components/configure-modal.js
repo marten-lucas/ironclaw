@@ -5,6 +5,7 @@ import { useT } from "../../../lib/i18n.js";
 import {
   useExtensionSetup,
   useExtensionConnectionTest,
+  useExtensionTestMessage,
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
@@ -33,6 +34,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     hasNextcloudSetupHandles;
   const oauthMutation = useOauthSetup(extensionPackageRef);
   const connectionTestMutation = useExtensionConnectionTest(extensionPackageRef);
+  const testMessageMutation = useExtensionTestMessage(extensionPackageRef);
 
   const submitMutation = useSetupSubmit(extensionPackageRef, (res) => {
     if (res.success !== false) {
@@ -70,6 +72,38 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       }
     );
   }, [values, fieldValues, connectionTestMutation]);
+  const handleTestMessage = React.useCallback(() => {
+    const roomId = window.prompt("Nextcloud Talk room token / Raum-ID eingeben:", "");
+    if (roomId == null) return;
+    const trimmedRoomId = roomId.trim();
+    if (!trimmedRoomId) {
+      setConnectionResult({
+        tone: "error",
+        message: "Room ID is required for the test message.",
+      });
+      return;
+    }
+    const secretPayload = {};
+    for (const [key, val] of Object.entries(values)) {
+      const trimmed = (val || "").trim();
+      if (trimmed) secretPayload[key] = trimmed;
+    }
+    const message = `Ironclaw Nextcloud test message (${new Date().toISOString()})`;
+    testMessageMutation.mutate(
+      { secrets: secretPayload, fields: fieldValues, roomId: trimmedRoomId, message },
+      {
+        onSuccess: (res) => {
+          setConnectionResult({
+            tone: res?.success === false ? "error" : "success",
+            message: res?.message || "Test message request completed.",
+          });
+        },
+        onError: (error) => {
+          setConnectionResult({ tone: "error", message: error.message });
+        },
+      }
+    );
+  }, [values, fieldValues, testMessageMutation]);
   const handleOauth = React.useCallback(
     (secret) => {
       const popup = window.open("about:blank", "_blank", "width=600,height=600");
@@ -299,9 +333,16 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           <${Button}
             variant="secondary"
             onClick=${handleTestConnection}
-            disabled=${connectionTestMutation.isPending || submitMutation.isPending || oauthMutation.isPending}
+            disabled=${connectionTestMutation.isPending || testMessageMutation.isPending || submitMutation.isPending || oauthMutation.isPending}
           >
             ${connectionTestMutation.isPending ? t("llm.testing") : t("llm.testConnection")}
+          <//>
+          <${Button}
+            variant="secondary"
+            onClick=${handleTestMessage}
+            disabled=${connectionTestMutation.isPending || testMessageMutation.isPending || submitMutation.isPending || oauthMutation.isPending}
+          >
+            ${testMessageMutation.isPending ? "Sending…" : "Testnachricht schicken"}
           <//>
         `}
         ${canActivate &&

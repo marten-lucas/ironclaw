@@ -194,6 +194,151 @@ pub(super) async fn test_extension_connection(
     )))
 }
 
+pub(super) async fn send_extension_test_message(
+    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: LifecyclePackageRef,
+    request: WebUiTestExtensionConnectionRequest,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    if package_ref.id.as_str() != "nextcloud-talk" {
+        return Ok(connection_fail(
+            "Test message is currently implemented only for nextcloud-talk.".to_string(),
+        ));
+    }
+
+    let extension_id = ExtensionId::new(package_ref.id.as_str())
+        .map_err(|_| RebornServicesError::internal_invariant())?;
+    let scope = credential_scope(&caller, &package_ref);
+
+    let base_url = match test_connection_value_with_fallback(
+        extension_credentials,
+        &request,
+        "nextcloud_talk_base_url",
+        scope.clone(),
+        &extension_id,
+    )
+    .await?
+    {
+        Some(value) => value,
+        None => {
+            return Ok(connection_fail(
+                "Missing nextcloud_talk_base_url. Enter and save the URL, or provide it in this dialog before sending a test message."
+                    .to_string(),
+            ))
+        }
+    };
+    let bot_username = match test_connection_value_with_fallback(
+        extension_credentials,
+        &request,
+        "nextcloud_talk_bot_username",
+        scope.clone(),
+        &extension_id,
+    )
+    .await?
+    {
+        Some(value) => value,
+        None => {
+            return Ok(connection_fail(
+                "Missing nextcloud_talk_bot_username. Enter and save the username, or provide it in this dialog before sending a test message."
+                    .to_string(),
+            ))
+        }
+    };
+    let app_password = match test_connection_value_with_fallback(
+        extension_credentials,
+        &request,
+        "nextcloud_talk_app_password",
+        scope,
+        &extension_id,
+    )
+    .await?
+    {
+        Some(value) => value,
+        None => {
+            return Ok(connection_fail(
+                "Missing nextcloud_talk_app_password. Save an app password first or enter it in this dialog before sending a test message."
+                    .to_string(),
+            ))
+        }
+    };
+
+    let room_id = request
+        .room_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| validation_error("room_id", WebUiInboundValidationCode::MissingField))?
+        .to_string();
+    let message = request
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "Ironclaw Nextcloud test message ({})",
+                chrono::Utc::now().to_rfc3339()
+            )
+        });
+
+    let normalized_base_url = match normalize_test_base_url(&base_url) {
+        Ok(value) => value,
+        Err(message) => return Ok(connection_fail(message)),
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| RebornServicesError::internal_invariant())?;
+
+    let url = format!(
+        "{}/ocs/v2.php/apps/spreed/api/v1/chat/{}",
+        normalized_base_url.trim_end_matches('/'),
+        room_id
+    );
+
+    let response = match client
+        .post(&url)
+        .basic_auth(&bot_username, Some(app_password))
+        .header("OCS-APIRequest", "true")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({ "message": message, "replyTo": 0 }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(err) => return Ok(connection_fail(describe_nextcloud_transport_error(&err))),
+    };
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let body_text = response.text().await.unwrap_or_default();
+
+    if status.is_success() {
+        if let Some(msg) = describe_nextcloud_success_payload_failure(&content_type, &body_text) {
+            return Ok(connection_fail(msg));
+        }
+        if let Some(msg) = describe_nextcloud_ocs_meta_failure(&body_text) {
+            return Ok(connection_fail(msg));
+        }
+        return Ok(connection_ok(format!(
+            "Test message sent to Nextcloud room {room_id} as {bot_username}."
+        )));
+    }
+
+    Ok(connection_fail(describe_nextcloud_send_http_error(
+        status,
+        &body_text,
+        &room_id,
+    )))
+}
+
 async fn test_connection_value_with_fallback(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     request: &WebUiTestExtensionConnectionRequest,
@@ -332,6 +477,27 @@ fn describe_nextcloud_http_error(status: reqwest::StatusCode, body: &str) -> Str
     } else {
         format!("Nextcloud returned HTTP status {status}. Response: {detail}")
     }
+}
+
+fn describe_nextcloud_send_http_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    room_id: &str,
+) -> String {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return "Authentication failed while sending the test message. Nextcloud rejected the username/app password. If you configured the normal account password instead of an app password, create an app password in Nextcloud Security settings and use that here."
+            .to_string();
+    }
+    if let Some(detail) = describe_nextcloud_ocs_meta_failure(body) {
+        return format!("Nextcloud rejected the test message for room {room_id}: {detail}");
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return format!(
+            "Nextcloud could not find room {room_id} (404). Check the Talk room token/ID."
+        );
+    }
+    let base = describe_nextcloud_http_error(status, body);
+    format!("Sending test message to room {room_id} failed. {base}")
 }
 
 fn describe_nextcloud_success_payload_failure(content_type: &str, body: &str) -> Option<String> {

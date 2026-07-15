@@ -290,6 +290,10 @@ pub struct WebUiTestExtensionConnectionRequest {
     pub secrets: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fields: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Browser body for WebUI gate-resolution mutation.

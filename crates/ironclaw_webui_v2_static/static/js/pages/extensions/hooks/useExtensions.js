@@ -12,6 +12,7 @@ import {
   fetchExtensionSetup,
   submitExtensionSetup,
   testExtensionConnection,
+  sendExtensionTestMessage,
   startExtensionOauth,
   fetchPairingRequests,
   approvePairingCode,
@@ -250,6 +251,13 @@ export function useSetupSubmit(packageRef, onSuccess) {
 export function useExtensionConnectionTest(packageRef) {
   return useMutation({
     mutationFn: ({ secrets, fields }) => testExtensionConnection(packageRef, secrets, fields),
+  });
+}
+
+export function useExtensionTestMessage(packageRef) {
+  return useMutation({
+    mutationFn: ({ secrets, fields, roomId, message }) =>
+      sendExtensionTestMessage(packageRef, secrets, fields, roomId, message),
   });
 }
 

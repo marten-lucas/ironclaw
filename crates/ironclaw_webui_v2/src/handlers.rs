@@ -1195,6 +1195,24 @@ pub async fn test_extension_connection(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/{package_id}/setup/test-message`
+pub async fn send_extension_test_message(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+    Json(body): Json<WebUiTestExtensionConnectionRequest>,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
+    let response = state
+        .services()
+        .send_extension_test_message(caller, package_ref, body)
+        .await?;
+    Ok(Json(response))
+}
+
 fn require_operator_webui_config(
     capabilities: WebUiV2Capabilities,
 ) -> Result<(), WebUiV2HttpError> {

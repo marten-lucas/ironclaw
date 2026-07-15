@@ -155,12 +155,16 @@ impl NextcloudTalkFinalReplyDriver {
                 })?,
         };
 
-        let turn_scope = TurnScope::new(
-            binding.tenant_id.clone(),
-            binding.agent_id.clone(),
-            binding.project_id.clone(),
-            binding.thread_id.clone(),
-        );
+        let thread_scope = binding
+            .clone()
+            .into_thread_scope()
+            .ok_or_else(|| {
+                NextcloudDeliveryError::BindingLookup(
+                    "resolved binding missing agent_id required for thread scope".to_string(),
+                )
+            })?;
+        let turn_scope = turn_scope_from_thread_scope(&binding, &thread_scope)
+            .map_err(|error| NextcloudDeliveryError::BindingLookup(error.to_string()))?;
 
         // Poll until the run reaches a terminal status.
         let terminal_status = self.wait_for_terminal(&turn_scope, run_id).await?;
@@ -175,17 +179,6 @@ impl NextcloudTalkFinalReplyDriver {
         }
 
         // Read the finalized assistant reply text.
-        let thread_scope = match binding.into_thread_scope() {
-            Some(scope) => scope,
-            None => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::nextcloud_delivery",
-                    %run_id,
-                    "Nextcloud Talk delivery binding has no agent_id; skipping reply delivery"
-                );
-                return Ok(());
-            }
-        };
         let reply_text = self
             .await_finalized_reply_text(&thread_scope, &turn_scope.thread_id, run_id)
             .await?;
@@ -347,6 +340,25 @@ impl ResolvedBindingExt for ironclaw_product_workflow::ResolvedBinding {
             mission_id: None,
         })
     }
+}
+
+fn turn_scope_from_thread_scope(
+    binding: &ironclaw_product_workflow::ResolvedBinding,
+    thread_scope: &ironclaw_threads::ThreadScope,
+) -> Result<TurnScope, ironclaw_product_workflow::ProductWorkflowError> {
+    let Some(agent_id) = binding.agent_id.clone() else {
+        return Err(ironclaw_product_workflow::ProductWorkflowError::BindingResolutionFailed {
+            reason: "resolved binding missing agent_id required for turn scope".to_string(),
+        });
+    };
+
+    Ok(TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        Some(agent_id),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        thread_scope.owner_user_id.clone(),
+    ))
 }
 
 #[derive(Debug, thiserror::Error)]

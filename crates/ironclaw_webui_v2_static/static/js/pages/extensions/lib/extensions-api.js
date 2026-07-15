@@ -48,6 +48,15 @@ export function testExtensionConnection(packageRef, secrets, fields) {
     }
   );
 }
+export function sendExtensionTestMessage(packageRef, secrets, fields, roomId, message) {
+  return apiFetch(
+    `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup/test-message`,
+    {
+      method: "POST",
+      body: JSON.stringify({ secrets, fields, room_id: roomId, message }),
+    }
+  );
+}
 export function startExtensionOauth(packageRef, secret) {
   const setup = secret?.setup || {};
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();

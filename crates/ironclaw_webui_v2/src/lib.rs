@@ -81,6 +81,7 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_READ_PROJECT_FILE, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
     WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_SEARCH_SKILLS, WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
+    WEBUI_V2_ROUTE_SEND_EXTENSION_TEST_MESSAGE,
     WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_SETUP_EXTENSION,
     WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
     WEBUI_V2_ROUTE_STAT_FS_PATH, WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
@@ -104,9 +105,9 @@ pub use handlers::{
     list_outbound_delivery_targets, list_skills, list_threads, query_operator_logs, read_fs_file,
     remove_extension, remove_skill, resolve_gate, run_operator_service_lifecycle,
     run_operator_setup, search_skills, send_message, set_active_llm, set_operator_config_key,
-    set_outbound_preferences, setup_extension, start_codex_login, start_nearai_login, stat_fs_path,
-    stream_events, stream_events_ws, test_llm_connection, trace_credits, update_skill,
-    upsert_llm_provider,
+    send_extension_test_message, set_outbound_preferences, setup_extension, start_codex_login,
+    start_nearai_login, stat_fs_path, stream_events, stream_events_ws, test_llm_connection,
+    trace_credits, update_skill, upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{

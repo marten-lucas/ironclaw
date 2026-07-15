@@ -1433,6 +1433,18 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    /// Send a test message using extension setup credentials without mutating
+    /// durable configuration.
+    async fn send_extension_test_message(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+        request: WebUiTestExtensionConnectionRequest,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        let _ = (caller, package_ref, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// LLM provider configuration: merged catalog + active selection.
     ///
     /// The six LLM-config methods default to "service unavailable" so facade
@@ -3038,6 +3050,21 @@ impl RebornServicesApi for RebornServices {
         request: WebUiTestExtensionConnectionRequest,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         lifecycle_setup::test_extension_connection(
+            self.extension_credentials.as_deref(),
+            caller,
+            package_ref,
+            request,
+        )
+        .await
+    }
+
+    async fn send_extension_test_message(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+        request: WebUiTestExtensionConnectionRequest,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        lifecycle_setup::send_extension_test_message(
             self.extension_credentials.as_deref(),
             caller,
             package_ref,

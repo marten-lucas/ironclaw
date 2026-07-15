@@ -35,6 +35,7 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SETUP_TEST_CONNECTION,
+    WEBUI_V2_PATTERN_SETUP_TEST_MESSAGE,
     WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
     WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STAT_FS_PATH,
     WEBUI_V2_PATTERN_STAT_PROJECT_FILE, WEBUI_V2_PATTERN_STREAM_EVENTS,
@@ -267,6 +268,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(
             WEBUI_V2_PATTERN_SETUP_TEST_CONNECTION,
             post(handlers::test_extension_connection),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETUP_TEST_MESSAGE,
+            post(handlers::send_extension_test_message),
         );
     if options.mount_llm_config_routes {
         router = router
