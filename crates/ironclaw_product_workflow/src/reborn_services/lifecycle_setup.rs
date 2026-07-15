@@ -552,9 +552,10 @@ fn describe_nextcloud_ocs_meta_failure(body: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
         .unwrap_or("Unknown Nextcloud OCS error");
 
-    // Some Nextcloud setups return OCS `statuscode: 200` with `status/message: OK`
-    // for successful capability probes. Treat this as success to avoid false negatives.
-    if status_code == 200
+    // Some Nextcloud setups return OCS `statuscode: 200` for capability probes
+    // and `statuscode: 201` for successful chat-message creation, both with
+    // `status/message: OK`. Treat those as success to avoid false negatives.
+    if matches!(status_code, 200 | 201)
         && (status.is_some_and(|v| v.eq_ignore_ascii_case("ok"))
             || message.eq_ignore_ascii_case("ok"))
     {
@@ -811,6 +812,20 @@ mod tests {
                 "meta": {
                     "status": "ok",
                     "statuscode": 200,
+                    "message": "OK"
+                }
+            }
+        }"#;
+        assert_eq!(describe_nextcloud_ocs_meta_failure(body), None);
+    }
+
+    #[test]
+    fn ocs_meta_accepts_statuscode_201_with_ok_message() {
+        let body = r#"{
+            "ocs": {
+                "meta": {
+                    "status": "ok",
+                    "statuscode": 201,
                     "message": "OK"
                 }
             }
