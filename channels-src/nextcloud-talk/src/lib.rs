@@ -23,11 +23,21 @@ struct TalkEvent {
     #[serde(rename = "type")]
     event_type: String,
     #[serde(default)]
+    #[serde(alias = "eventId")]
+    event_id: Option<String>,
+    #[serde(default)]
     actor: Option<TalkActor>,
     #[serde(default)]
     object: Option<TalkObject>,
     #[serde(default)]
     target: Option<TalkTarget>,
+    #[serde(default)]
+    #[serde(alias = "bridgeMessage")]
+    bridge_message: Option<TalkBridgeMessage>,
+    #[serde(default)]
+    reply_context: Option<serde_json::Value>,
+    #[serde(default)]
+    reaction: Option<TalkReaction>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,12 +59,60 @@ struct TalkObject {
     name: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "replyTo")]
+    reply_to: Option<u64>,
+    #[serde(default)]
+    attachments: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    #[serde(alias = "attachmentErrors")]
+    attachment_errors: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    #[serde(alias = "replyContext")]
+    reply_context: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TalkTarget {
     #[serde(default)]
     id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TalkBridgeMessage {
+    #[serde(default)]
+    raw: Option<String>,
+    #[serde(default)]
+    attachments: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    #[serde(alias = "attachmentErrors")]
+    attachment_errors: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    #[serde(alias = "replyContext")]
+    reply_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TalkReaction {
+    #[serde(default)]
+    emoji: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "eventType")]
+    event_type: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "targetMessageId")]
+    target_message_id: Option<u64>,
+    #[serde(default)]
+    semantic: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "uiAction")]
+    ui_action: Option<String>,
+    #[serde(default)]
+    #[serde(alias = "requiresAuthorization")]
+    requires_authorization: Option<bool>,
+    #[serde(default)]
+    #[serde(alias = "isAuthorized")]
+    is_authorized: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,28 +166,62 @@ impl Guest for NextcloudTalkAdapter {
         let event: TalkEvent = serde_json::from_str(body_text)
             .map_err(|err| format!("nextcloud-talk: failed to parse event payload: {err}"))?;
 
-        let parsed = if event.event_type != "Create" || is_bot_authored(&event) {
-            build_noop_inbound(&event)?
-        } else {
-            let room_token = match extract_room_token(&event) {
-                Some(v) => v,
-                None => return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? }),
-            };
+        let parsed = match event.event_type.as_str() {
+            "Create" => {
+                if is_bot_authored(&event) {
+                    build_noop_inbound(&event)?
+                } else {
+                    let room_token = match extract_room_token(&event) {
+                        Some(v) => v,
+                        None => return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? }),
+                    };
 
-            let raw_content = event
-                .object
-                .as_ref()
-                .and_then(|obj| obj.content.clone())
-                .unwrap_or_default();
+                    let raw_content = event
+                        .object
+                        .as_ref()
+                        .and_then(|obj| obj.content.clone())
+                        .or_else(|| {
+                            event
+                                .bridge_message
+                                .as_ref()
+                                .and_then(|bridge| bridge.raw.clone())
+                        })
+                        .unwrap_or_default();
 
-            let rendered = parse_message_content(&raw_content).trim().to_string();
-            if rendered.is_empty() {
-                return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
+                    let rendered = parse_message_content(&raw_content).trim().to_string();
+                    let mut attachments = extract_attachments(&event);
+                    if let Some(reply_context) = extract_reply_context(&event) {
+                        attachments.push(reply_context);
+                    }
+
+                    if rendered.is_empty() && attachments.is_empty() {
+                        return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? });
+                    }
+
+                    let prompt = sanitize_prompt(&rendered, DEFAULT_BOT_NAME);
+                    let text = if !prompt.is_empty() {
+                        prompt
+                    } else if !rendered.is_empty() {
+                        rendered
+                    } else {
+                        "Please analyze the provided attachment context.".to_string()
+                    };
+
+                    build_user_message_inbound(&event, room_token, text, attachments)?
+                }
             }
-
-            let prompt = sanitize_prompt(&rendered, DEFAULT_BOT_NAME);
-            let text = if prompt.is_empty() { rendered } else { prompt };
-            build_user_message_inbound(&event, room_token, text)?
+            "ReactionAdded" | "ReactionRemoved" => {
+                if is_bot_authored(&event) {
+                    build_noop_inbound(&event)?
+                } else {
+                    let room_token = match extract_room_token(&event) {
+                        Some(v) => v,
+                        None => return Ok(ParsedInbound { parsed_json: build_noop_inbound(&event)? }),
+                    };
+                    build_reaction_inbound(&event, room_token)?
+                }
+            }
+            _ => build_noop_inbound(&event)?,
         };
 
         Ok(ParsedInbound {
@@ -258,9 +350,14 @@ fn build_noop_inbound(event: &TalkEvent) -> Result<String, String> {
         .unwrap_or_else(|| "unknown-actor".to_string());
     let room_token = extract_room_token(event).unwrap_or_else(|| "unknown-room".to_string());
     let event_id = event
-        .object
-        .as_ref()
-        .and_then(|obj| non_empty_trimmed(obj.id.as_deref()))
+        .event_id
+        .clone()
+        .or_else(|| {
+            event
+                .object
+                .as_ref()
+                .and_then(|obj| non_empty_trimmed(obj.id.as_deref()))
+        })
         .unwrap_or_else(|| format!("event:{}:{room_token}:{actor_id}", event.event_type));
 
     let payload = ParsedInboundJson {
@@ -289,6 +386,7 @@ fn build_user_message_inbound(
     event: &TalkEvent,
     room_token: String,
     text: String,
+    attachments: Vec<serde_json::Value>,
 ) -> Result<String, String> {
     let actor_id = event
         .actor
@@ -299,8 +397,10 @@ fn build_user_message_inbound(
         .object
         .as_ref()
         .and_then(|obj| non_empty_trimmed(obj.id.as_deref()));
-    let event_id = message_id
+    let event_id = event
+        .event_id
         .clone()
+        .or_else(|| message_id.clone())
         .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
 
     let payload = ParsedInboundJson {
@@ -321,12 +421,184 @@ fn build_user_message_inbound(
         },
         payload: InboundPayloadJson::UserMessage(UserMessagePayloadJson {
             text,
-            attachments: vec![],
+            attachments,
             trigger: TriggerReasonJson::DirectChat,
         }),
     };
     serde_json::to_string(&payload)
         .map_err(|err| format!("nextcloud-talk: failed to encode parsed inbound payload: {err}"))
+}
+
+fn build_reaction_inbound(event: &TalkEvent, room_token: String) -> Result<String, String> {
+    let actor_id = event
+        .actor
+        .as_ref()
+        .and_then(|a| non_empty_trimmed(a.id.as_deref()))
+        .unwrap_or_else(|| "unknown-actor".to_string());
+
+    let message_id = event
+        .object
+        .as_ref()
+        .and_then(|obj| non_empty_trimmed(obj.id.as_deref()))
+        .unwrap_or_else(|| "0".to_string());
+
+    let reaction = event.reaction.as_ref();
+    let emoji = reaction
+        .and_then(|r| non_empty_trimmed(r.emoji.as_deref()))
+        .unwrap_or_else(|| "?".to_string());
+    let semantic = reaction
+        .and_then(|r| non_empty_trimmed(r.semantic.as_deref()))
+        .unwrap_or_else(|| "reaction_event".to_string());
+    let ui_action = reaction
+        .and_then(|r| non_empty_trimmed(r.ui_action.as_deref()))
+        .unwrap_or_else(|| "informational".to_string());
+    let requires_authorization = reaction
+        .and_then(|r| r.requires_authorization)
+        .unwrap_or(false);
+    let is_authorized = reaction.and_then(|r| r.is_authorized).unwrap_or(true);
+    let event_type = reaction
+        .and_then(|r| non_empty_trimmed(r.event_type.as_deref()))
+        .unwrap_or_else(|| event.event_type.clone());
+    let target_message_id = reaction
+        .and_then(|r| r.target_message_id)
+        .unwrap_or(0);
+
+    let text = match semantic.as_str() {
+        "helpful_feedback" => "User marked the bot answer as helpful (thumbs up).".to_string(),
+        "needs_rephrase" => {
+            "User gave thumbs down. Offer a rephrased answer or a different focus.".to_string()
+        }
+        "regenerate_same_context" => "User requested regeneration with the same context.".to_string(),
+        "human_approved" => {
+            if is_authorized {
+                "Authorized human approval received for the pending action.".to_string()
+            } else {
+                "A non-authorized actor attempted to approve a pending action.".to_string()
+            }
+        }
+        "human_not_approved" => {
+            if is_authorized {
+                "Authorized human rejection received for the pending action.".to_string()
+            } else {
+                "A non-authorized actor attempted to reject a pending action.".to_string()
+            }
+        }
+        "escalation_flag" => "User requested escalation or human review for this response.".to_string(),
+        _ => format!("Reaction event received: {emoji}"),
+    };
+
+    let payload = ParsedInboundJson {
+        external_event_id: event
+            .event_id
+            .clone()
+            .or_else(|| event.object.as_ref().and_then(|obj| non_empty_trimmed(obj.id.as_deref())))
+            .unwrap_or_else(|| format!("reaction:{room_token}:{actor_id}:{emoji}")),
+        external_actor_ref: ExternalActorRefJson {
+            kind: "nextcloud_user".to_string(),
+            id: actor_id,
+            display_name: event
+                .actor
+                .as_ref()
+                .and_then(|a| non_empty_trimmed(a.name.as_deref())),
+        },
+        external_conversation_ref: ExternalConversationRefJson {
+            space_id: None,
+            conversation_id: room_token,
+            topic_id: None,
+            reply_target_message_id: Some(message_id),
+        },
+        payload: InboundPayloadJson::UserMessage(UserMessagePayloadJson {
+            text,
+            attachments: vec![serde_json::json!({
+                "kind": "reaction_signal",
+                "emoji": emoji,
+                "semantic": semantic,
+                "ui_action": ui_action,
+                "event_type": event_type,
+                "requires_authorization": requires_authorization,
+                "is_authorized": is_authorized,
+                "target_message_id": target_message_id
+            })],
+            trigger: TriggerReasonJson::DirectChat,
+        }),
+    };
+
+    serde_json::to_string(&payload)
+        .map_err(|err| format!("nextcloud-talk: failed to encode reaction inbound payload: {err}"))
+}
+
+fn extract_attachments(event: &TalkEvent) -> Vec<serde_json::Value> {
+    let mut items = Vec::new();
+    if let Some(object_attachments) = event
+        .object
+        .as_ref()
+        .and_then(|obj| obj.attachments.as_ref())
+    {
+        items.extend(object_attachments.iter().cloned());
+    }
+    if let Some(bridge_attachments) = event
+        .bridge_message
+        .as_ref()
+        .and_then(|bridge| bridge.attachments.as_ref())
+    {
+        items.extend(bridge_attachments.iter().cloned());
+    }
+    if let Some(object_errors) = event
+        .object
+        .as_ref()
+        .and_then(|obj| obj.attachment_errors.as_ref())
+    {
+        items.extend(
+            object_errors
+                .iter()
+                .cloned()
+                .map(|value| serde_json::json!({ "kind": "attachment_error", "value": value })),
+        );
+    }
+    if let Some(bridge_errors) = event
+        .bridge_message
+        .as_ref()
+        .and_then(|bridge| bridge.attachment_errors.as_ref())
+    {
+        items.extend(
+            bridge_errors
+                .iter()
+                .cloned()
+                .map(|value| serde_json::json!({ "kind": "attachment_error", "value": value })),
+        );
+    }
+    items
+}
+
+fn extract_reply_context(event: &TalkEvent) -> Option<serde_json::Value> {
+    let value = event
+        .reply_context
+        .as_ref()
+        .or_else(|| {
+            event
+                .object
+                .as_ref()
+                .and_then(|object| object.reply_context.as_ref())
+        })
+        .or_else(|| {
+            event
+                .bridge_message
+                .as_ref()
+                .and_then(|bridge| bridge.reply_context.as_ref())
+        })
+        .cloned()
+        .or_else(|| {
+            event.object.as_ref().and_then(|object| {
+                object
+                    .reply_to
+                    .map(|reply_to| serde_json::json!({ "parentMessageId": reply_to }))
+            })
+        })?;
+
+    Some(serde_json::json!({
+        "kind": "reply_context",
+        "value": value,
+    }))
 }
 
 fn extract_room_token(event: &TalkEvent) -> Option<String> {
@@ -569,5 +841,123 @@ mod tests {
             .collect::<Vec<_>>();
         let body_json: serde_json::Value = serde_json::from_slice(&bytes).expect("body json");
         assert_eq!(body_json.get("replyTo"), Some(&serde_json::Value::from(0_u64)));
+    }
+
+    #[test]
+    fn extracts_reply_context_from_reply_to_fallback() {
+        let event: TalkEvent = serde_json::from_str(
+            r#"{
+                "type": "Create",
+                "object": {
+                    "id": "10",
+                    "replyTo": 42
+                }
+            }"#,
+        )
+        .expect("event json");
+
+        let context = extract_reply_context(&event).expect("reply context");
+        assert_eq!(context.get("kind").and_then(serde_json::Value::as_str), Some("reply_context"));
+        assert_eq!(
+            context
+                .get("value")
+                .and_then(|value| value.get("parentMessageId"))
+                .and_then(serde_json::Value::as_u64),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn extracts_attachments_from_object_and_bridge_message() {
+        let event: TalkEvent = serde_json::from_str(
+            r#"{
+                "type": "Create",
+                "object": {
+                    "id": "10",
+                    "attachments": [{"name": "report.pdf"}]
+                },
+                "bridgeMessage": {
+                    "attachments": [{"name": "image.png"}]
+                }
+            }"#,
+        )
+        .expect("event json");
+
+        let attachments = extract_attachments(&event);
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            attachments[0].get("name").and_then(serde_json::Value::as_str),
+            Some("report.pdf")
+        );
+        assert_eq!(
+            attachments[1].get("name").and_then(serde_json::Value::as_str),
+            Some("image.png")
+        );
+    }
+
+    #[test]
+    fn maps_attachment_errors_into_attachment_context() {
+        let event: TalkEvent = serde_json::from_str(
+            r#"{
+                "type": "Create",
+                "object": {
+                    "id": "10",
+                    "attachmentErrors": [{"code": "attachment_too_large"}]
+                }
+            }"#,
+        )
+        .expect("event json");
+
+        let attachments = extract_attachments(&event);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].get("kind").and_then(serde_json::Value::as_str),
+            Some("attachment_error")
+        );
+        assert_eq!(
+            attachments[0]
+                .get("value")
+                .and_then(|v| v.get("code"))
+                .and_then(serde_json::Value::as_str),
+            Some("attachment_too_large")
+        );
+    }
+
+    #[test]
+    fn builds_reaction_signal_attachment() {
+        let event: TalkEvent = serde_json::from_str(
+            r#"{
+                "type": "ReactionAdded",
+                "eventId": "ev-r-1",
+                "actor": {"id": "alice", "name": "Alice"},
+                "object": {"id": "19"},
+                "target": {"id": "room-alpha"},
+                "reaction": {
+                    "emoji": "👎",
+                    "semantic": "needs_rephrase",
+                    "uiAction": "offer_rephrase",
+                    "eventType": "ReactionAdded",
+                    "targetMessageId": 19,
+                    "requiresAuthorization": false,
+                    "isAuthorized": true
+                }
+            }"#,
+        )
+        .expect("event json");
+
+        let parsed = build_reaction_inbound(&event, "room-alpha".to_string()).expect("reaction inbound");
+        let payload: serde_json::Value = serde_json::from_str(&parsed).expect("payload json");
+        assert_eq!(payload.get("external_event_id"), Some(&serde_json::Value::from("ev-r-1")));
+        assert_eq!(
+            payload
+                .get("payload")
+                .and_then(|v| v.get("user_message"))
+                .and_then(|v| v.get("attachments"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.get("semantic"))
+                .and_then(serde_json::Value::as_str),
+            Some("needs_rephrase")
+        );
     }
 }
