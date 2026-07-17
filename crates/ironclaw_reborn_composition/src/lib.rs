@@ -41,35 +41,9 @@ mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
-mod manual_token_flow;
-mod mcp;
-mod mcp_discovery;
-mod mount_filesystem_reader;
-#[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
-mod nearai_login_serve;
-mod nearai_mcp;
-#[cfg(feature = "webui-v2-beta")]
-mod nextcloud_delivery;
-#[cfg(feature = "webui-v2-beta")]
-mod nextcloud_egress;
-#[cfg(feature = "webui-v2-beta")]
-mod nextcloud_talk_serve;
-mod notion_oauth;
-mod oauth_dcr;
-mod oauth_dcr_protocol;
-mod oauth_gate;
-mod oauth_provider_client;
-#[cfg(feature = "openai-compat-beta")]
-mod openai_compat_serve;
-mod operator_logs;
-mod outbound_delivery_capability_surface;
-mod outbound_preferences;
-mod product_auth_durable;
-mod product_auth_providers;
-mod product_auth_runtime_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod product_auth_serve;
-mod product_live_adapters;
+mod observability;
+mod outbound;
+mod product_auth;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile_approval_authorization;
@@ -155,15 +129,6 @@ pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService
 pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
-};
-#[cfg(feature = "webui-v2-beta")]
-pub use nextcloud_egress::{
-    NextcloudEgressCredential, NextcloudEgressCredentialError, NextcloudEgressCredentialProvider,
-    NextcloudProtocolHttpEgress, StaticNextcloudEgressCredentialProvider,
-};
-#[cfg(feature = "webui-v2-beta")]
-pub use nextcloud_talk_serve::{
-    NextcloudTalkBuildError, NextcloudTalkRouteConfig, build_nextcloud_talk_route_mount,
 };
 #[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;

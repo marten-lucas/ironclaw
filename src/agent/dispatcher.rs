@@ -25,7 +25,7 @@ use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 use ironclaw_llm::{
     ChatMessage, OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY, Reasoning,
-    ReasoningContext, ThinkingModeOverride, TokenUsage,
+    ReasoningContext, ReasoningDetails, ThinkingModeOverride, TokenUsage,
 };
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {

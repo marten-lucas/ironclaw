@@ -49,13 +49,14 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, WebUiTestExtensionConnectionRequest,
+    WebUiSetupExtensionRequest,
+    WebUiTestExtensionConnectionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -107,6 +108,7 @@ use ironclaw_approvals::{
     ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
     ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
 };
+use crate::webui_inbound::{WebUiRenameAutomationRequest, WebUiRetryRunRequest};
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
@@ -4793,6 +4795,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.channel_connection_facade),
             Arc::clone(&self.extension_runtime_status),
             caller,
         )

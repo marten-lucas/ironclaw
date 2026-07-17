@@ -1239,11 +1239,7 @@ pub(crate) async fn apply_decorator_chain(
     include_standalone_cheap: bool,
     enable_model_routing: bool,
 ) -> Result<ProviderChainComponents, LlmError> {
-    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
-        create_openai_codex_provider(config).await?
-    } else {
-        create_llm_provider(config, session.clone()).await?
-    };
+    let llm: Arc<dyn LlmProvider> = raw;
     tracing::debug!("LLM provider initialized: {}", llm.model_name());
 
     // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
@@ -1386,6 +1382,28 @@ pub(crate) async fn apply_decorator_chain(
         primary: llm,
         cheap: cheap_llm,
     })
+}
+
+async fn build_provider_chain_components_with_options(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+    include_standalone_cheap: bool,
+    enable_model_routing: bool,
+) -> Result<ProviderChainComponents, LlmError> {
+    let llm: Arc<dyn LlmProvider> = if config.backend == "openai_codex" {
+        create_openai_codex_provider(config).await?
+    } else {
+        create_llm_provider(config, session.clone()).await?
+    };
+
+    apply_decorator_chain(
+        llm,
+        config,
+        session,
+        include_standalone_cheap,
+        enable_model_routing,
+    )
+    .await
 }
 
 /// Build a primary provider chain for composition roots that do not own

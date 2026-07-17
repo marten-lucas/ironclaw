@@ -36,6 +36,7 @@ use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
 use crate::{OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY};
+use ironclaw_common::llm_costs as costs;
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {

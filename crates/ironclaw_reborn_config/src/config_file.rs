@@ -443,7 +443,7 @@ pub struct SlackChannelRouteSection {
 /// Deprecated: Nextcloud Talk routing is now mounted from extension metadata
 /// and credentials configured via setup UI. This section remains parseable for
 /// backward compatibility but is ignored by the serve command.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NextcloudTalkSection {
     /// Explicit enablement gate for a native Nextcloud webhook route.

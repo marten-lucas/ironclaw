@@ -53,13 +53,13 @@ export function EmptyState({
       </div>
 
       <div className="mt-9 w-full max-w-5xl">
-        ${preComposerContent || null}
-        <${ChatInput}
-          onSend=${onSend}
-          disabled=${disabled}
-          initialText=${initialText}
-          resetKey=${resetKey}
-          draftKey=${draftKey}
+        {preComposerContent || null}
+        <ChatInput
+          onSend={onSend}
+          disabled={disabled}
+          initialText={initialText}
+          resetKey={resetKey}
+          draftKey={draftKey}
           variant="hero"
           context={context}
           statusText={statusText}

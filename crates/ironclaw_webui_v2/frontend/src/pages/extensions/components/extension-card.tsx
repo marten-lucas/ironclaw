@@ -225,8 +225,8 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       data-extension-id={packageId(ext)}
     >
       <div className="flex items-start gap-2">
-        <${Badge} tone=${tone} label=${label} size="sm" />
-        ${runtimeState && html`<${Badge} tone=${runtimeTone} label=${runtimeLabel} size="sm" />`}
+        <Badge tone={tone} label={label} size="sm" />
+        {runtimeState && (<Badge tone={runtimeTone} label={runtimeLabel} size="sm" />)}
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
           {displayName}
         </span>

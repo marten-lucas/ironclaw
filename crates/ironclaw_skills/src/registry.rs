@@ -16,6 +16,7 @@
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};

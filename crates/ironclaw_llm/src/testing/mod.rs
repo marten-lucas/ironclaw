@@ -70,7 +70,8 @@ pub async fn provider_chain_over(
     config: &crate::config::LlmConfig,
     session: std::sync::Arc<crate::session::SessionManager>,
 ) -> Result<std::sync::Arc<dyn crate::provider::LlmProvider>, crate::error::LlmError> {
-    crate::apply_decorator_chain(raw, config, session).await
+    let components = crate::apply_decorator_chain(raw, config, session, false, false).await?;
+    Ok(components.primary)
 }
 
 use std::sync::Arc;

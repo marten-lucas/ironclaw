@@ -30,6 +30,7 @@ const EXTENSION_READINESS_CONCURRENCY: usize = 8;
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     extension_runtime_status: Arc<dyn ExtensionRuntimeStatusService>,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<RebornExtensionListResponse, RebornServicesError> {
@@ -50,6 +51,7 @@ pub(super) async fn list_extensions(
             extension_credentials,
             extension_runtime_status,
             caller,
+            connections,
         )
         .await?,
     })
@@ -247,7 +249,7 @@ async fn lifecycle_extension_infos(
     Ok(resolved
         .into_iter()
         .map(|(installed, readiness, runtime_status)| {
-            extension_info(installed, readiness, runtime_status)
+            extension_info(installed, readiness, runtime_status, &connections)
         })
         .collect())
 }
@@ -290,6 +292,7 @@ fn extension_info(
     installed: LifecycleInstalledExtensionSummary,
     readiness: ExtensionCredentialReadiness,
     runtime_status: Option<String>,
+    connections: &HashMap<String, bool>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
     let has_auth = !installed.summary.credential_requirements.is_empty();
