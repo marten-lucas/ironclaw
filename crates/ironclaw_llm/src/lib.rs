@@ -18,7 +18,6 @@ pub mod circuit_breaker;
 pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
-pub mod costs;
 pub mod error;
 pub mod failover;
 pub(crate) mod gemini_oauth;
@@ -66,7 +65,7 @@ pub use config::{
     BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
     OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
 };
-pub use error::{LlmConfigError, LlmError};
+pub use error::{LlmConfigError, LlmError, UNCONFIGURED_PROVIDER_ID};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub(crate) use gemini_oauth::GeminiOauthProvider;
 pub use host::{
@@ -79,9 +78,10 @@ pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{DeviceCodeStart, OpenAiCodexSessionManager};
 pub use provider::sanitize_tool_messages;
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
+    FinishReason, ImageUrl, LlmProvider, ModelMetadata, ReasoningDetail, ReasoningDetails, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     ActionPlan, OLLAMA_NUM_CTX_METADATA_KEY, OLLAMA_THINKING_MODE_METADATA_KEY, Reasoning,
@@ -99,11 +99,11 @@ pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 #[cfg(feature = "registry-provider-factory")]
 pub use resolution::{
-    ProviderResolutionError, ProviderSelection, ResolvedDedicatedProviderConfig,
-    ResolvedProviderConfig, build_llm_config_from_resolved_provider,
-    build_registry_provider_config_from_resolved_provider, resolve_llm_config_from_env,
-    resolve_llm_config_from_selection, resolve_provider_config_from_env,
-    resolve_provider_config_from_selection,
+    NEARAI_CLOUD_DEFAULT_BASE_URL, NEARAI_PRIVATE_DEFAULT_BASE_URL, ProviderResolutionError,
+    ProviderSelection, ResolvedDedicatedProviderConfig, ResolvedProviderConfig,
+    build_llm_config_from_resolved_provider, build_registry_provider_config_from_resolved_provider,
+    default_nearai_base_url, resolve_llm_config_from_env, resolve_llm_config_from_selection,
+    resolve_provider_config_from_env, resolve_provider_config_from_selection,
 };
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
@@ -243,12 +243,16 @@ fn create_registry_provider_inner(
     }
 
     match config.protocol {
-        ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
-        ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
-        ProviderProtocol::Ollama => create_ollama_from_registry(config),
-        ProviderProtocol::DeepSeek => create_deepseek_from_registry(config),
-        ProviderProtocol::Gemini => create_gemini_from_registry(config),
-        ProviderProtocol::OpenRouter => create_openrouter_from_registry(config),
+        ProviderProtocol::OpenAiCompletions => {
+            create_openai_compat_from_registry(config, request_timeout_secs)
+        }
+        ProviderProtocol::Anthropic => create_anthropic_from_registry(config, request_timeout_secs),
+        ProviderProtocol::Ollama => create_ollama_from_registry(config, request_timeout_secs),
+        ProviderProtocol::DeepSeek => create_deepseek_from_registry(config, request_timeout_secs),
+        ProviderProtocol::Gemini => create_gemini_from_registry(config, request_timeout_secs),
+        ProviderProtocol::OpenRouter => {
+            create_openrouter_from_registry(config, request_timeout_secs)
+        }
         ProviderProtocol::GithubCopilot => {
             let provider =
                 github_copilot::GithubCopilotProvider::new(config, request_timeout_secs)?;
@@ -304,7 +308,7 @@ fn create_codex_chatgpt_from_registry(
         config.refresh_token.clone(),
         config.auth_path.clone(),
         request_timeout_secs,
-    );
+    )?;
 
     Ok(Arc::new(provider))
 }
@@ -336,12 +340,21 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
 /// which is why a self-hosted local provider (Ollama, vLLM, …) fails even
 /// though `curl` to the same URL works. Remote hosts keep default proxy
 /// behavior, so this is a no-op for hosted providers behind a corporate proxy.
-fn provider_http_client(provider_id: &str, base_url: &str) -> Result<reqwest::Client, LlmError> {
-    crate::url_check::build_http_client(provider_id, base_url, reqwest::Client::builder())
+fn provider_http_client(
+    provider_id: &str,
+    base_url: &str,
+    request_timeout_secs: u64,
+) -> Result<reqwest::Client, LlmError> {
+    crate::url_check::build_http_client(
+        provider_id,
+        base_url,
+        crate::config::hardened_client_builder(request_timeout_secs),
+    )
 }
 
 fn create_openai_compat_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use rig::providers::openai;
 
@@ -396,9 +409,14 @@ fn create_openai_compat_from_registry(
         normalize_openai_base_url(&config.base_url)
     };
 
-    let mut builder = openai::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(&config.provider_id, &config.base_url)?);
+    let mut builder =
+        openai::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&normalized_base_url);
     }
@@ -439,6 +457,7 @@ fn create_openai_compat_from_registry(
 
 fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     // Route to OAuth provider when an OAuth token is present and no real API
     // key was provided. When both are set, the API key takes priority (standard
@@ -473,9 +492,14 @@ fn create_anthropic_from_registry(
     // a localhost/self-hosted Anthropic-compatible endpoint bypasses the system
     // proxy for live chat too — not just model discovery. Remote hosts keep
     // default proxy behavior.
-    let mut builder = anthropic::Client::<reqwest::Client>::builder()
-        .api_key(&api_key)
-        .http_client(provider_http_client(&config.provider_id, &config.base_url)?);
+    let mut builder =
+        anthropic::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -537,14 +561,19 @@ fn create_anthropic_from_registry(
 
 fn create_ollama_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use rig::client::Nothing;
     use rig::providers::ollama;
 
-    let client: ollama::Client = ollama::Client::<reqwest::Client>::builder()
+    let client: ollama::Client = ollama::Client::builder()
         .base_url(&config.base_url)
         .api_key(Nothing)
-        .http_client(provider_http_client(&config.provider_id, &config.base_url)?)
+        .http_client(provider_http_client(
+            &config.provider_id,
+            &config.base_url,
+            request_timeout_secs,
+        )?)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: config.provider_id.clone(),
@@ -600,6 +629,7 @@ fn create_ollama_from_registry(
 /// See #3201.
 fn create_deepseek_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use rig::providers::deepseek;
 
@@ -611,15 +641,18 @@ fn create_deepseek_from_registry(
             provider: config.provider_id.clone(),
         })?;
 
-    let client: deepseek::Client = if config.base_url.is_empty() {
-        deepseek::Client::new(&api_key)
-    } else {
+    let mut builder =
         deepseek::Client::builder()
             .api_key(&api_key)
-            .base_url(&config.base_url)
-            .build()
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
+    if !config.base_url.is_empty() {
+        builder = builder.base_url(&config.base_url);
     }
-    .map_err(|e| LlmError::RequestFailed {
+    let client: deepseek::Client = builder.build().map_err(|e| LlmError::RequestFailed {
         provider: config.provider_id.clone(),
         reason: format!("Failed to create DeepSeek client: {e}"),
     })?;
@@ -650,6 +683,7 @@ fn create_deepseek_from_registry(
 /// the same way as #3201 / #3225.
 fn create_openrouter_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use rig::providers::openrouter;
 
@@ -694,7 +728,14 @@ fn create_openrouter_from_registry(
         extra_headers.insert(name, val);
     }
 
-    let mut builder = openrouter::Client::builder().api_key(&api_key);
+    let mut builder =
+        openrouter::Client::builder()
+            .api_key(&api_key)
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &config.base_url,
+                request_timeout_secs,
+            )?);
     if !config.base_url.is_empty() {
         builder = builder.base_url(&config.base_url);
     }
@@ -735,6 +776,7 @@ fn create_openrouter_from_registry(
 /// through the separate `gemini_oauth` backend.
 fn create_gemini_from_registry(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     use rig::providers::gemini;
 
@@ -754,15 +796,18 @@ fn create_gemini_from_registry(
     // request. Discard any persisted shim URL and use the native default.
     let base_url = sanitize_gemini_base_url(&config.base_url);
 
-    let client: gemini::Client = if base_url.is_empty() {
-        gemini::Client::new(&api_key)
-    } else {
+    let mut builder =
         gemini::Client::builder()
             .api_key(&api_key)
-            .base_url(&base_url)
-            .build()
+            .http_client(provider_http_client(
+                &config.provider_id,
+                &base_url,
+                request_timeout_secs,
+            )?);
+    if !base_url.is_empty() {
+        builder = builder.base_url(&base_url);
     }
-    .map_err(|e| LlmError::RequestFailed {
+    let client: gemini::Client = builder.build().map_err(|e| LlmError::RequestFailed {
         provider: config.provider_id.clone(),
         reason: format!("Failed to create Gemini client: {e}"),
     })?;
@@ -1177,7 +1222,18 @@ pub(crate) async fn build_provider_chain_components(
     build_provider_chain_components_with_options(config, session, true, true).await
 }
 
-async fn build_provider_chain_components_with_options(
+/// Apply the LLM decorator chain over a raw provider: Retry → SmartRouting →
+/// Failover → CircuitBreaker → ResponseCache. Each decorator is configured from
+/// `config`; when its config field is disabled/zero it is a passthrough that
+/// returns its inner provider unchanged. This is the single source of truth for
+/// decorator-chain assembly — assemble the chain only through this function, not
+/// inline or at a higher seam.
+///
+/// Crate-internal: production assembles the chain here, and the only
+/// cross-crate access is the test-only `testing::provider_chain_over` door
+/// (gated by the `testing` feature), so the production API is not widened.
+pub(crate) async fn apply_decorator_chain(
+    raw: Arc<dyn LlmProvider>,
     config: &LlmConfig,
     session: Arc<SessionManager>,
     include_standalone_cheap: bool,
@@ -1466,7 +1522,7 @@ mod tests {
             provider: None,
             bedrock: None,
             gemini_oauth: None,
-            request_timeout_secs: 120,
+            request_timeout_secs: crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
             cheap_model: None,
             smart_routing_cascade: true,
             openai_codex: None,
@@ -1861,6 +1917,177 @@ mod tests {
         assert_eq!(
             sanitize_gemini_base_url("https://gemini-proxy.internal.example.com/"),
             "https://gemini-proxy.internal.example.com",
+        );
+    }
+
+    /// Regression test: `create_registry_provider_inner` must forward
+    /// `request_timeout_secs` to the HTTP client builder, not silently fall
+    /// back to `DEFAULT_REQUEST_TIMEOUT_SECS`. A user who sets
+    /// `LLM_REQUEST_TIMEOUT_SECS=300` for a slow local backend would otherwise
+    /// still get a 60 s timeout and watch requests to Ollama/OpenAI-compat time
+    /// out prematurely.
+    ///
+    /// We cannot read the timeout back out of a built `reqwest::Client`, so the
+    /// observable seam is: `create_registry_provider_inner` must succeed and
+    /// return a provider whose model name matches the config. If the
+    /// `request_timeout_secs` parameter were not threaded through, changing the
+    /// function signature (removing the param) would cause a compile error here,
+    /// making this a structural guard. Additionally, we verify the
+    /// `provider_http_client` helper itself builds without panic for a
+    /// non-default timeout.
+    #[test]
+    fn request_timeout_secs_forwarded_to_registry_http_client() {
+        use crate::config::{DEFAULT_REQUEST_TIMEOUT_SECS, RegistryProviderConfig};
+        use crate::registry::ProviderProtocol;
+
+        // A custom timeout value different from the default — ensures we are
+        // exercising a distinct code path, not the default falling back.
+        let custom_timeout: u64 = DEFAULT_REQUEST_TIMEOUT_SECS * 2;
+
+        // Verify `provider_http_client` accepts and uses the custom timeout
+        // (loopback URL keeps the test hermetic — no network required).
+        let client_result =
+            provider_http_client("test-provider", "http://127.0.0.1:0", custom_timeout);
+        assert!(
+            client_result.is_ok(),
+            "provider_http_client must succeed with custom timeout: {:?}",
+            client_result.err(),
+        );
+
+        // Verify the param flows through `create_openai_compat_from_registry`.
+        let openai_compat_config = RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "test-openai-compat",
+            None,
+            "http://127.0.0.1:0",
+            "test-model-openai",
+        );
+        let result = create_openai_compat_from_registry(&openai_compat_config, custom_timeout);
+        assert!(
+            result.is_ok(),
+            "create_openai_compat_from_registry must succeed: {:?}",
+            result.err(),
+        );
+        assert_eq!(result.unwrap().model_name(), "test-model-openai");
+
+        // Verify the param flows through `create_ollama_from_registry`.
+        let ollama_config = RegistryProviderConfig::generic(
+            ProviderProtocol::Ollama,
+            "test-ollama",
+            None,
+            "http://127.0.0.1:11434",
+            "test-model-ollama",
+        );
+        let result = create_ollama_from_registry(&ollama_config, custom_timeout);
+        assert!(
+            result.is_ok(),
+            "create_ollama_from_registry must succeed: {:?}",
+            result.err(),
+        );
+        assert_eq!(result.unwrap().model_name(), "test-model-ollama");
+    }
+
+    /// Behavioral regression: `create_registry_provider_inner` must forward
+    /// `request_timeout_secs` all the way to the HTTP client built for the
+    /// matched protocol arm. A future arm that re-hardcodes
+    /// `DEFAULT_REQUEST_TIMEOUT_SECS` (instead of passing the caller's value)
+    /// would still compile and would leave the existing structural test green —
+    /// but THIS test would fail: the outer `tokio::time::timeout` guard would
+    /// fire (the provider would block for the full 60 s default instead of the
+    /// 2 s SHORT_TIMEOUT_SECS) or the elapsed-time assertion would trip.
+    ///
+    /// Design:
+    ///   1. Bind a local TCP listener that accepts but never writes — the
+    ///      TCP handshake completes so the 10 s connect_timeout is not in play;
+    ///      the HTTP response never arrives so only the request timeout fires.
+    ///   2. Build an OpenAI-compat provider through the real dispatch seam
+    ///      (`create_registry_provider_inner`) with SHORT_TIMEOUT_SECS = 2.
+    ///   3. Issue a minimal chat completion and assert it errors well under the
+    ///      60 s DEFAULT_REQUEST_TIMEOUT_SECS.
+    #[tokio::test]
+    async fn create_registry_provider_inner_timeout_is_behaviorally_observed() {
+        use std::time::Instant;
+        use tokio::net::TcpListener;
+
+        use crate::config::RegistryProviderConfig;
+        use crate::provider::{ChatMessage, CompletionRequest};
+        use crate::registry::ProviderProtocol;
+
+        // 2 s timeout — short enough to make the test fast, long enough to be
+        // above Linux scheduler jitter.
+        const SHORT_TIMEOUT_SECS: u64 = 2;
+
+        // Bind a loopback listener so the TCP handshake succeeds but no HTTP
+        // response bytes are ever written.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // Spawn: accept one connection and hold it open silently.
+        tokio::spawn(async move {
+            if let Ok((_socket, _peer)) = listener.accept().await {
+                // Hold the socket alive until this task is dropped; the reqwest
+                // client blocks waiting for HTTP response headers.
+                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            }
+        });
+
+        // Build an OpenAI-compat provider via the real dispatch seam.
+        let config = RegistryProviderConfig::generic(
+            ProviderProtocol::OpenAiCompletions,
+            "regression-timeout-provider",
+            Some(secrecy::SecretString::from("dummy-api-key".to_string())),
+            format!("http://127.0.0.1:{}", addr.port()),
+            "regression-timeout-model",
+        );
+
+        let provider = create_registry_provider_inner(&config, SHORT_TIMEOUT_SECS)
+            .expect("provider construction must succeed");
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("ping")]);
+
+        let start = Instant::now();
+
+        // Outer guard: if the future hasn't resolved within 10 s, the timeout
+        // was not forwarded and the provider is using the full 60 s
+        // DEFAULT_REQUEST_TIMEOUT_SECS — surface that as a clear failure
+        // rather than an infinite hang.
+        let outcome = tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            provider.complete(request),
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+
+        // The outer guard must not have fired — the provider's own short
+        // timeout must have resolved the future well before our 10 s limit.
+        assert!(
+            outcome.is_ok(),
+            "Provider still waiting after >10 s — SHORT_TIMEOUT_SECS \
+             ({SHORT_TIMEOUT_SECS} s) was not forwarded to the HTTP client \
+             through `create_registry_provider_inner`. Elapsed: {elapsed:?}. \
+             Check that every `match config.protocol` arm passes \
+             `request_timeout_secs` down to `provider_http_client`.",
+        );
+
+        // The provider call must have returned an error (the hung server never
+        // sends bytes, so a successful response is impossible).
+        let call_result = outcome.unwrap();
+        assert!(
+            call_result.is_err(),
+            "Expected an error from the hung server, got a successful response",
+        );
+
+        // Elapsed should be close to SHORT_TIMEOUT_SECS, not 60 s.
+        // 5 s of headroom for CI scheduler variance; well below DEFAULT (60 s).
+        assert!(
+            elapsed.as_secs() < 5,
+            "Request resolved after {elapsed:?} — expected under 5 s for a \
+             {SHORT_TIMEOUT_SECS} s timeout. If DEFAULT_REQUEST_TIMEOUT_SECS \
+             (60 s) is being used, `create_registry_provider_inner` is not \
+             forwarding `request_timeout_secs` to `provider_http_client`.",
         );
     }
 }

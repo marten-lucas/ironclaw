@@ -204,16 +204,28 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
     PublicRouteMount::new(router, sso_route_descriptors())
 }
 
+/// Build the inert auth discovery mount used when no SSO providers are
+/// configured. This deliberately does not mount the login/session/logout
+/// handlers because there is no revocable SSO session store in env-bearer mode.
+pub fn empty_webui_v2_auth_providers_mount() -> PublicRouteMount {
+    let router = axum::Router::new().route(PATH_PROVIDERS, get(empty_providers_handler));
+    PublicRouteMount::new(router, vec![providers_descriptor()])
+}
+
 // ── descriptors ───────────────────────────────────────────────────────
+
+fn providers_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        ROUTE_ID_PROVIDERS,
+        NetworkMethod::Get,
+        PATH_PROVIDERS,
+        public_policy(BodyLimitPolicy::NoBody, SSO_PROVIDERS_MAX_REQUESTS),
+    )
+}
 
 fn sso_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![
-        descriptor(
-            ROUTE_ID_PROVIDERS,
-            NetworkMethod::Get,
-            PATH_PROVIDERS,
-            public_policy(BodyLimitPolicy::NoBody, SSO_PROVIDERS_MAX_REQUESTS),
-        ),
+        providers_descriptor(),
         descriptor(
             ROUTE_ID_LOGIN,
             NetworkMethod::Get,
@@ -343,6 +355,12 @@ async fn providers_handler(State(state): State<RouterStateHandle>) -> Json<Provi
     Json(ProvidersResponse { providers })
 }
 
+async fn empty_providers_handler() -> Json<ProvidersResponse> {
+    Json(ProvidersResponse {
+        providers: Vec::new(),
+    })
+}
+
 // ─── /auth/login/{provider} ───────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -358,6 +376,7 @@ struct LoginParams {
 /// authorization URL.
 async fn login_handler(
     State(state): State<RouterStateHandle>,
+    headers: HeaderMap,
     Path(raw_provider): Path<String>,
     Query(params): Query<LoginParams>,
     headers: HeaderMap,
@@ -708,6 +727,55 @@ fn error_code_for(err: &OAuthError) -> &'static str {
     }
 }
 
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::HOST)?.to_str().ok()
+}
+
+fn canonical_login_location(
+    base_url: &str,
+    headers: &HeaderMap,
+    provider_name: &OAuthProviderName,
+    redirect_after: Option<&str>,
+) -> Option<String> {
+    let request_host = request_host(headers)?;
+    let base = url::Url::parse(base_url).ok()?;
+    if request_host_matches_base(request_host, &base) {
+        return None;
+    }
+
+    let mut url = base;
+    url.set_path(&format!("/auth/login/{provider_name}"));
+    url.set_query(None);
+    if let Some(redirect_after) = redirect_after {
+        url.query_pairs_mut()
+            .append_pair("redirect_after", redirect_after);
+    }
+    Some(url.to_string())
+}
+
+fn request_host_matches_base(request_host: &str, base: &url::Url) -> bool {
+    let Ok(authority) = request_host.trim().parse::<axum::http::uri::Authority>() else {
+        return true;
+    };
+    let Some(base_host) = base.host_str() else {
+        return true;
+    };
+    if !authority.host().eq_ignore_ascii_case(base_host) {
+        return false;
+    }
+
+    let request_port = authority.port_u16().or_else(|| default_port(base.scheme()));
+    request_port == base.port_or_known_default()
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    }
+}
+
 fn log_oauth_error(provider_name: &OAuthProviderName, err: &OAuthError) {
     // Provider error bodies and JWT decode details are operator-only
     // — never echoed back to the client. Logged at `warn!` so they
@@ -716,7 +784,16 @@ fn log_oauth_error(provider_name: &OAuthProviderName, err: &OAuthError) {
     tracing::warn!(
         target = "ironclaw::reborn::webui_ingress::auth",
         provider = %provider_name,
+        error_kind = error_kind_for(err),
         error = %err,
         "OAuth flow failed",
     );
+}
+
+fn error_kind_for(err: &OAuthError) -> &'static str {
+    match err {
+        OAuthError::CodeExchange(_) => "code_exchange",
+        OAuthError::ProfileFetch(_) => "profile_fetch",
+        OAuthError::Denied(_) => "denied",
+    }
 }
