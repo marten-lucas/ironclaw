@@ -196,6 +196,7 @@ pub use reborn_services::{
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
     RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
     RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorStatusCheck,

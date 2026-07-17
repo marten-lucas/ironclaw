@@ -752,33 +752,6 @@ fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
     Ok(())
 }
 
-/// Convert caller-supplied `tools[]` into engine-native `ActionDef`s for
-/// registration in the per-thread external tool catalog. Caller schemas
-/// pass through unchanged: `parameters` becomes `parameters_schema`.
-/// Effects are stamped as `Compute` (no externally-claimed effect type)
-/// and `requires_approval` is false — caller-side gating is the
-/// caller's responsibility, not the engine's.
-fn responses_tools_to_action_defs(tools: &[ResponsesTool]) -> Vec<ironclaw_engine::ActionDef> {
-    tools
-        .iter()
-        .filter_map(|t| {
-            let name = t.name.clone()?;
-            Some(ironclaw_engine::ActionDef {
-                name,
-                description: t.description.clone().unwrap_or_default(),
-                parameters_schema: t
-                    .parameters
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
-                effects: vec![ironclaw_engine::EffectType::Compute],
-                requires_approval: false,
-                model_tool_surface: ironclaw_engine::ModelToolSurface::FullSchema,
-                discovery: None,
-            })
-        })
-        .collect()
-}
-
 /// Synthetic engine action names that the orchestrator emits as
 /// `ActionStarted`/`ActionFailed` events for internal bookkeeping
 /// (CodeAct script execution, etc.) but which are not real
@@ -1363,12 +1336,8 @@ pub async fn create_response_handler(
     // path where the caller crafts any output and the LLM treats it
     // as the trusted internal action's reply.
     //
-    // Two collision sources:
+    // Collision source:
     //   - `ToolRegistry::tool_definitions()` — built-ins + extensions.
-    //   - `engine_capability_action_names()` — capability actions
-    //     registered via the engine v2 CapabilityRegistry. The
-    //     `tool_registry` check alone misses these because they live
-    //     on a different surface.
     //
     // The check runs only when the tool registry is wired; deployments
     // without a registry also lack engine v2 (they are constructed
@@ -1384,9 +1353,6 @@ pub async fn create_response_handler(
             .into_iter()
             .map(|t| t.name)
             .collect();
-        if let Some(capability_names) = crate::bridge::engine_capability_action_names().await {
-            reserved.extend(capability_names);
-        }
         for tool in &external_tools {
             if let Some(name) = tool.name.as_deref()
                 && reserved.contains(name)
@@ -1394,8 +1360,8 @@ pub async fn create_response_handler(
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
                     format!(
-                        "tool '{name}' shadows a built-in, extension, or engine \
-                         action; pick a different name"
+                        "tool '{name}' shadows a built-in or extension action; \
+                         pick a different name"
                     ),
                     "invalid_request_error",
                 ));
@@ -1472,19 +1438,13 @@ pub async fn create_response_handler(
     // between the bridge and this handler. Falling back to the
     // `ENGINE_V2` env var would diverge from the agent loop's runtime
     // config (`Config::agent::engine_v2`), which is the actual switch.
-    let catalog = if !external_tools.is_empty() {
-        let cat = crate::bridge::engine_external_tool_catalog().await;
-        if cat.is_none() {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "Caller-supplied 'tools' require engine v2 to be enabled on the server",
-                "invalid_request_error",
-            ));
-        }
-        cat
-    } else {
-        None
-    };
+    if !external_tools.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Caller-supplied 'tools' require engine v2 to be enabled on the server",
+            "invalid_request_error",
+        ));
+    }
 
     let extracted = extract_user_content(&req.input)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
@@ -1545,145 +1505,16 @@ pub async fn create_response_handler(
     )
     .await;
 
-    // Register caller-supplied tools in the engine's per-thread external
-    // tool catalog. The engine's `EffectBridgeAdapter` consults this on
-    // every action call to short-circuit caller tools to a
-    // `GatePaused { resume_kind: External { ext_tool:<call_id> } }`,
-    // which the bridge router projects to `AppEvent::ExternalToolCall`.
-    if let Some(catalog) = catalog.as_ref() {
-        let action_defs = responses_tools_to_action_defs(&external_tools);
-        catalog
-            .register(ironclaw_engine::ThreadId(thread_uuid), action_defs)
-            .await;
-    }
-
     // Resume detection: a request that carries `function_call_output`
     // items resolves the most recent `ResumeKind::External` gate for
     // this thread. Without a pending gate the request is malformed —
     // there's nothing to resume against.
     if !extracted.tool_outputs.is_empty() {
-        let pending = crate::bridge::get_engine_pending_gate(&user.user_id, Some(&thread_id_str))
-            .await
-            .map_err(|e| {
-                api_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to look up pending gate: {e}"),
-                    "server_error",
-                )
-            })?;
-        let pending = pending.ok_or_else(|| {
-            api_error(
-                StatusCode::BAD_REQUEST,
-                "function_call_output supplied but no pending external tool call for \
-                 this thread. Verify the prior response.output array contained a \
-                 `function_call` item for this call_id; if it did not, the agent did \
-                 not actually invoke the caller-supplied tool.",
-                "invalid_request_error",
-            )
-        })?;
-        // Verify the pending gate is actually an external-tool gate.
-        // A thread can be paused on an unrelated approval/auth gate
-        // (e.g. OAuth callback in progress); without this check, a
-        // `function_call_output` would route through the wrong gate
-        // and silently fail to resolve, returning a confusing
-        // response to the client.
-        let expected_call_id = match &pending.resume_kind {
-            ironclaw_engine::ResumeKind::External { callback_id }
-                if crate::bridge::is_external_tool_callback_id(callback_id) =>
-            {
-                crate::bridge::call_id_from_external_callback(callback_id)
-                    .unwrap_or("")
-                    .to_string()
-            }
-            _ => {
-                return Err(api_error(
-                    StatusCode::BAD_REQUEST,
-                    "function_call_output supplied but the pending gate for this thread \
-                     is not an external tool callback (it is an unrelated approval, \
-                     authentication, or OAuth/pairing gate). Resolve that gate first.",
-                    "invalid_request_error",
-                ));
-            }
-        };
-        // The pending gate names exactly one outstanding external
-        // tool call (call_id is embedded in the callback id). At
-        // least one of the supplied `function_call_output` items
-        // must match it — otherwise the resume payload describes a
-        // call the engine never made.
-        if !extracted
-            .tool_outputs
-            .iter()
-            .any(|(call_id, _)| call_id == &expected_call_id)
-        {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "function_call_output supplied does not match the pending external \
-                 tool callback for this thread; verify the call_id matches the \
-                 `function_call` item from the prior response.",
-                "invalid_request_error",
-            ));
-        }
-        let request_uuid = uuid::Uuid::parse_str(&pending.request_id).map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "pending gate has malformed request_id",
-                "server_error",
-            )
-        })?;
-        let payload = serde_json::json!({
-            "outputs": extracted
-                .tool_outputs
-                .iter()
-                .map(|(call_id, output)| serde_json::json!({
-                    "call_id": call_id,
-                    "output": output,
-                }))
-                .collect::<Vec<_>>(),
-        });
-        let submission = crate::agent::submission::Submission::ExternalCallback {
-            request_id: request_uuid,
-            payload: Some(payload),
-        };
-        let placeholder = "[external tool callback]".to_string();
-        let mut metadata = serde_json::json!({
-            "thread_id": &thread_id_str,
-            "user_id": &user.user_id,
-            "source": "responses_api",
-            "responses_request_id": &response_request_id,
-            "responses_response_id": &resp_id,
-        });
-        if !request_model.eq_ignore_ascii_case("default") {
-            metadata["selected_model"] = serde_json::json!(request_model);
-        }
-        if let Some(ref ctx) = req.x_context {
-            metadata["context"] = ctx.clone();
-        }
-        let resume_msg = crate::channels::web::util::web_incoming_message_with_metadata(
-            "gateway",
-            &user.user_id,
-            &placeholder,
-            Some(&thread_id_str),
-            metadata,
-        )
-        .with_structured_submission(submission);
-
-        let model = request_model.clone();
-        let stream = req.stream.unwrap_or(false);
-        let context = ResponseDispatchContext {
-            thread_id: thread_id_str,
-            request_id: response_request_id,
-            user_id: user.user_id.clone(),
-            response_timeout: resolve_response_timeout(req.timeout_sec),
-        };
-        if stream {
-            return handle_streaming(state, resume_msg, resp_id, model, context)
-                .await
-                .map(IntoResponse::into_response);
-        } else {
-            return handle_non_streaming(state, resume_msg, resp_id, model, context)
-                .await
-                .map(IntoResponse::into_response);
-        }
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "function_call_output supplied but no pending external tool call for this thread.",
+            "invalid_request_error",
+        ));
     }
 
     // Build the message for the agent loop.

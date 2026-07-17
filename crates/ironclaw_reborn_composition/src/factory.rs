@@ -466,6 +466,8 @@ pub struct RebornServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    pub(crate) production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
     /// Shared scoped secret store. Exposed so runtime-level features can
     /// resolve credential material without introducing parallel secret paths.
     pub(crate) secret_store: Arc<dyn SecretStore>,
@@ -1220,6 +1222,8 @@ impl RebornServices {
             local_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_runtime: None,
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            production_scheduler_wake: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
             #[cfg(any(test, feature = "test-support"))]
             local_dev_wasm_runtime_credential_provider_captured: false,
@@ -1999,6 +2003,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         local_runtime: Some(store_graph.local_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: None,
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        production_scheduler_wake: None,
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
         local_dev_wasm_runtime_credential_provider_captured,
@@ -5148,6 +5154,8 @@ where
         local_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: Some(production_runtime),
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
         local_dev_wasm_runtime_credential_provider_captured,

@@ -407,6 +407,22 @@ pub async fn start_server(
             "/v1/models",
             get(crate::channels::web::openai_compat::models_handler),
         )
+        .route(
+            "/api/v1/responses",
+            post(crate::channels::web::responses_api::create_response_handler),
+        )
+        .route(
+            "/api/v1/responses/{id}",
+            get(crate::channels::web::responses_api::get_response_handler),
+        )
+        .route(
+            "/v1/responses",
+            post(crate::channels::web::responses_api::create_response_handler),
+        )
+        .route(
+            "/v1/responses/{id}",
+            get(crate::channels::web::responses_api::get_response_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
