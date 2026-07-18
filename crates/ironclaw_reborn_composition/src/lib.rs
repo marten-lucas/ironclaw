@@ -257,6 +257,32 @@ pub use webui::webui_serve::{
     WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Clone, Debug)]
+pub struct NextcloudTalkRouteConfig {
+    pub tenant_id: ironclaw_host_api::TenantId,
+    pub agent_id: ironclaw_host_api::AgentId,
+    pub project_id: Option<ironclaw_host_api::ProjectId>,
+    pub user_id: ironclaw_host_api::UserId,
+    pub extension_id: String,
+    pub webhook_path: String,
+    pub bot_name: String,
+    pub nextcloud_host: Option<String>,
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[derive(Debug, thiserror::Error)]
+#[error("Nextcloud Talk ingress is not enabled in this composition build")]
+pub struct NextcloudTalkBuildError;
+
+#[cfg(feature = "webui-v2-beta")]
+pub async fn build_nextcloud_talk_route_mount(
+    _runtime: &RebornRuntime,
+    _config: NextcloudTalkRouteConfig,
+) -> Result<PublicRouteMount, NextcloudTalkBuildError> {
+    Err(NextcloudTalkBuildError)
+}
+
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
 /// Kept narrow on purpose — the composition CLAUDE.md says "Expose

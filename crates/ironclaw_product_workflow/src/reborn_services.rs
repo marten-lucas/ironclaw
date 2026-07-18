@@ -4975,6 +4975,44 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn get_operator_diagnostics(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+        let status = match self.operator_status.status(caller).await {
+            Ok(status) => status,
+            Err(_) => {
+                let diagnostics = vec![operator_doctor_status_unavailable_diagnostic()];
+                return Ok(RebornOperatorCommandPlaneResponse {
+                    area: RebornOperatorArea::Diagnostics,
+                    status: operator_diagnostics_surface_status(&diagnostics),
+                    message: "operator diagnostics unavailable".to_string(),
+                    operator_status: None,
+                    logs: None,
+                    service_lifecycle: None,
+                    diagnostics,
+                });
+            }
+        };
+
+        let diagnostics = status
+            .checks
+            .iter()
+            .filter_map(operator_doctor_status_diagnostic)
+            .collect::<Vec<_>>();
+        let status = operator_doctor_status_response(status);
+
+        Ok(RebornOperatorCommandPlaneResponse {
+            area: RebornOperatorArea::Diagnostics,
+            status: operator_diagnostics_surface_status(&diagnostics),
+            message: "operator diagnostics computed".to_string(),
+            operator_status: Some(status),
+            logs: None,
+            service_lifecycle: None,
+            diagnostics,
+        })
+    }
+
     async fn query_logs(
         &self,
         caller: WebUiAuthenticatedCaller,

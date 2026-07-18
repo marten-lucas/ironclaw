@@ -289,6 +289,16 @@ fn parse_enabled_flag(raw: &str) -> bool {
     )
 }
 
+fn log_provider_config(provider: &str, client_id: &str, client_secret_len: usize) {
+    tracing::info!(
+        target = "ironclaw::reborn::cli::serve",
+        provider,
+        client_id,
+        client_secret_len,
+        "configured OAuth provider credentials"
+    );
+}
+
 /// Read an env var, returning `None` when it is unset or blank.
 fn non_empty_env(name: &str) -> Option<String> {
     let raw = env::var(name).ok()?;
@@ -535,7 +545,7 @@ mod tests {
 
     #[test]
     fn yunohost_trusted_headers_with_allowlist_mounts_sso_config() {
-        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_sso_env();
         unsafe {
             std::env::set_var(YUNOHOST_TRUSTED_HEADERS_ENV, "1");

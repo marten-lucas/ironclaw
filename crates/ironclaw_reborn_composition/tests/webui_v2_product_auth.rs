@@ -268,6 +268,7 @@ impl UnusedServices {
                     tools: Vec::new(),
                     needs_setup: true,
                     has_auth: true,
+                    runtime_status: None,
                     activation_status: None,
                     activation_error: None,
                     version: None,
