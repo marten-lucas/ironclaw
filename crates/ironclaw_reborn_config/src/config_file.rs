@@ -463,6 +463,27 @@ pub struct NextcloudTalkSection {
     pub bot_name: Option<String>,
     /// Mention match expression for mention-only mode.
     pub mention_regex: Option<String>,
+    /// Profile-to-model map used by channel-triggered runs.
+    ///
+    /// `default` is mandatory and acts as the fallback route when a requested
+    /// profile is unknown.
+    #[serde(default = "default_nextcloud_model_profiles")]
+    pub model_profiles: std::collections::BTreeMap<String, String>,
+}
+
+fn default_nextcloud_model_profiles() -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("default".to_string(), "qwen-3.6-9b".to_string());
+    map.insert("coding".to_string(), "qwen2.5-coder".to_string());
+    map.insert("vision".to_string(), "llava".to_string());
+    map
+}
+
+fn is_valid_model_profile_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -1086,6 +1107,31 @@ impl RebornConfigFile {
                     host,
                 )?;
             }
+            for (profile, model) in &nextcloud.model_profiles {
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("nextcloud_talk.model_profiles.{profile}.name")),
+                    profile,
+                )?;
+                if !is_valid_model_profile_name(profile.trim()) {
+                    return Err(RebornConfigFileError::InvalidField {
+                        path: attributed_path.display().to_string(),
+                        field: format!("nextcloud_talk.model_profiles.{profile}.name"),
+                        reason: "profile names may only contain letters, numbers, '_' or '-'"
+                            .to_string(),
+                    });
+                }
+                check_non_empty_trimmed(
+                    Cow::Owned(format!("nextcloud_talk.model_profiles.{profile}")),
+                    model,
+                )?;
+            }
+            if !nextcloud.model_profiles.contains_key("default") {
+                return Err(RebornConfigFileError::InvalidField {
+                    path: attributed_path.display().to_string(),
+                    field: "nextcloud_talk.model_profiles".to_string(),
+                    reason: "must include a `default` profile".to_string(),
+                });
+            }
         }
         if let Some(budget) = &self.budget {
             if let Some(tz) = &budget.default_tz {
@@ -1521,6 +1567,7 @@ base_url = "https://next.cloud.example"
 backend_allowlist = ["next.cloud.example"]
 bot_name = "IronClaw"
 mention_regex = "@ironclaw"
+model_profiles = { default = "qwen-3.6-9b", coding = "qwen2.5-coder", vision = "llava" }
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1581,6 +1628,72 @@ mention_regex = "@ironclaw"
             Some("/webhooks/nextcloud/talk")
         );
         assert_eq!(nextcloud.backend_allowlist, vec!["next.cloud.example"]);
+        assert_eq!(
+            nextcloud.model_profiles.get("default").map(String::as_str),
+            Some("qwen-3.6-9b")
+        );
+        assert_eq!(
+            nextcloud.model_profiles.get("coding").map(String::as_str),
+            Some("qwen2.5-coder")
+        );
+        assert_eq!(
+            nextcloud.model_profiles.get("vision").map(String::as_str),
+            Some("llava")
+        );
+    }
+
+    #[test]
+    fn nextcloud_model_profiles_default_when_omitted() {
+        let toml = r#"
+[nextcloud_talk]
+enabled = true
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("nextcloud config should parse with default model profiles");
+        let nextcloud = cfg.nextcloud_talk.expect("nextcloud_talk section present");
+        assert_eq!(
+            nextcloud.model_profiles.get("default").map(String::as_str),
+            Some("qwen-3.6-9b")
+        );
+        assert_eq!(
+            nextcloud.model_profiles.get("coding").map(String::as_str),
+            Some("qwen2.5-coder")
+        );
+        assert_eq!(
+            nextcloud.model_profiles.get("vision").map(String::as_str),
+            Some("llava")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_nextcloud_model_profile_mapping_value() {
+        let toml = r#"
+[nextcloud_talk]
+model_profiles = { default = "qwen-3.6-9b", coding = "   " }
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty model profile values must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string().contains("nextcloud_talk.model_profiles.coding"),
+            "error should identify nextcloud_talk.model_profiles.coding: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_nextcloud_model_profile_name() {
+        let toml = r#"
+[nextcloud_talk]
+model_profiles = { default = "qwen-3.6-9b", "coding profile" = "qwen2.5-coder" }
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("invalid profile names must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+        assert!(
+            err.to_string()
+                .contains("nextcloud_talk.model_profiles.coding profile.name"),
+            "error should identify invalid profile name location: {err}"
+        );
     }
 
     #[test]

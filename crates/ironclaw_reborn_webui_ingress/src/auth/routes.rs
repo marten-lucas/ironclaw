@@ -376,7 +376,6 @@ struct LoginParams {
 /// authorization URL.
 async fn login_handler(
     State(state): State<RouterStateHandle>,
-    headers: HeaderMap,
     Path(raw_provider): Path<String>,
     Query(params): Query<LoginParams>,
     headers: HeaderMap,

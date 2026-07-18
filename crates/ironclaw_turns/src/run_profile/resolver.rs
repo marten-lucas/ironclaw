@@ -228,6 +228,11 @@ impl RunProfileDefinition {
         self
     }
 
+    pub fn with_model_profile_id(mut self, model_profile_id: ModelProfileId) -> Self {
+        self.model_profile_id = model_profile_id;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);

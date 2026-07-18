@@ -26,6 +26,7 @@
 //! transition unchanged — the only thing that changes is whether the
 //! `LlmSlotSelection` input came from a TOML reader or a repo read.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use thiserror::Error;
@@ -119,16 +120,52 @@ pub fn resolve_reborn_runtime_llm(
     boot: &RebornBootConfig,
     config_file: Option<&RebornConfigFile>,
 ) -> Result<Option<ResolvedRebornLlm>, RebornLlmCatalogError> {
+    let model_profile_overrides = extract_model_profile_overrides(config_file);
     if let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) {
         return resolve_llm_selection_against_catalog(
             selection,
             Some(boot.home().providers_file_path().as_path()),
         )
         .map(ResolvedRebornLlm::from_llm_config)
+        .map(|resolved| resolved.with_model_profile_overrides(model_profile_overrides.clone()))
         .map(Some);
     }
 
-    resolve_llm_from_env(boot)
+    resolve_llm_from_env(boot).map(|maybe| {
+        maybe.map(|resolved| resolved.with_model_profile_overrides(model_profile_overrides))
+    })
+}
+
+fn extract_model_profile_overrides(config_file: Option<&RebornConfigFile>) -> BTreeMap<String, String> {
+    let mut overrides = BTreeMap::new();
+    let Some(nextcloud) = config_file.and_then(|file| file.nextcloud_talk.as_ref()) else {
+        return overrides;
+    };
+
+    for (profile, model) in &nextcloud.model_profiles {
+        let profile = profile.trim();
+        let model = model.trim();
+        if profile.is_empty() || model.is_empty() {
+            continue;
+        }
+        let model_profile_id = if profile.eq_ignore_ascii_case("default") {
+            "interactive_model".to_string()
+        } else {
+            format!("{profile}_model")
+        };
+        overrides.insert(model_profile_id, model.to_string());
+    }
+
+    if !overrides.contains_key("interactive_model") {
+        if let Some(default_slot) = config_file.and_then(RebornConfigFile::default_llm_slot)
+            && let Some(model) = default_slot.model.as_deref().map(str::trim)
+            && !model.is_empty()
+        {
+            overrides.insert("interactive_model".to_string(), model.to_string());
+        }
+    }
+
+    overrides
 }
 
 fn resolve_llm_from_env(
@@ -509,6 +546,75 @@ mod tests {
             unsupported_params: Vec::new(),
             setup: None,
         }
+    }
+
+    #[test]
+    fn resolve_runtime_llm_carries_nextcloud_model_profile_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().to_path_buf();
+        let boot = RebornBootConfig::new(home.clone());
+
+        std::fs::write(
+            home.join("providers.json"),
+            r#"[
+  {
+    "id": "openai",
+    "aliases": [],
+    "protocol": "openai-completions",
+    "default_base_url": "https://api.openai.com/v1",
+    "base_url_env": null,
+    "base_url_required": false,
+    "api_key_env": null,
+    "api_key_required": false,
+    "model_env": "UNUSED_MODEL_ENV",
+    "default_model": "gpt-4o-mini",
+    "description": "OpenAI",
+    "extra_headers_env": null,
+    "unsupported_params": [],
+    "setup": null
+  }
+]"#,
+        )
+        .expect("write providers.json");
+
+        let config = RebornConfigFile::parse_text(
+            r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-4o-mini"
+
+[nextcloud_talk]
+model_profiles = { default = "qwen-3.6-9b", coding = "qwen2.5-coder", vision = "llava" }
+"#,
+            &home.join("config.toml"),
+        )
+        .expect("parse config");
+
+        let resolved = resolve_reborn_runtime_llm(&boot, Some(&config))
+            .expect("resolve llm")
+            .expect("resolved llm present");
+
+        assert_eq!(
+            resolved
+                .model_profile_overrides
+                .get("interactive_model")
+                .map(String::as_str),
+            Some("qwen-3.6-9b")
+        );
+        assert_eq!(
+            resolved
+                .model_profile_overrides
+                .get("coding_model")
+                .map(String::as_str),
+            Some("qwen2.5-coder")
+        );
+        assert_eq!(
+            resolved
+                .model_profile_overrides
+                .get("vision_model")
+                .map(String::as_str),
+            Some("llava")
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@ use ironclaw_loop_host::{SubagentDefinition, SubagentDefinitionResolver, Subagen
 use ironclaw_turns::{RunProfileRequest, TurnRunId, run_profile::AgentLoopHostError};
 use serde::{Deserialize, Serialize};
 
-use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
+use crate::planned_driver_factory::{
+    SUBAGENT_CODER_PLANNED_PROFILE_ID, SUBAGENT_PLANNED_PROFILE_ID,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +24,13 @@ impl SubagentFlavorId {
             Self::Explorer => "explorer",
             Self::Coder => "coder",
             Self::Planner => "planner",
+        }
+    }
+
+    fn requested_run_profile_id(self) -> &'static str {
+        match self {
+            Self::Coder => SUBAGENT_CODER_PLANNED_PROFILE_ID,
+            Self::General | Self::Explorer | Self::Planner => SUBAGENT_PLANNED_PROFILE_ID,
         }
     }
 }
@@ -171,7 +180,7 @@ impl SubagentDefinitionResolver for StaticSubagentDefinitionResolver {
         Ok(Some(SubagentDefinition {
             subagent_kind: kind.clone(),
             allow_nesting: flavor.allow_nesting,
-            requested_run_profile: RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).map_err(
+            requested_run_profile: RunProfileRequest::new(id.requested_run_profile_id()).map_err(
                 |reason| {
                     AgentLoopHostError::new(
                         ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
@@ -388,6 +397,23 @@ mod tests {
         assert_eq!(
             policy.requested_run_profile.as_str(),
             SUBAGENT_PLANNED_PROFILE_ID
+        );
+        assert!(!policy.allow_nesting);
+    }
+
+    #[tokio::test]
+    async fn static_policy_resolver_binds_coder_to_coder_profile() {
+        let resolver = StaticSubagentDefinitionResolver;
+        let policy = resolver
+            .resolve_kind(&SubagentKindId::new("coder").unwrap())
+            .await
+            .unwrap()
+            .expect("coder flavor");
+
+        assert_eq!(policy.subagent_kind.as_str(), "coder");
+        assert_eq!(
+            policy.requested_run_profile.as_str(),
+            SUBAGENT_CODER_PLANNED_PROFILE_ID
         );
         assert!(!policy.allow_nesting);
     }

@@ -22,6 +22,8 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "root-llm-provider")]
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
@@ -132,6 +134,11 @@ pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
     pub(crate) config: ironclaw_llm::LlmConfig,
+    /// Optional runtime route overrides keyed by `ModelProfileId` string.
+    ///
+    /// Each entry maps a profile id like `coding_model` to a concrete provider
+    /// model name override such as `qwen2.5-coder`.
+    pub(crate) model_profile_overrides: BTreeMap<String, String>,
     /// Optional decorator applied to the provider the gateway builds from
     /// `config`. `config` is always the construction source (so it stays the
     /// single source of truth for `provider_id`/`model` and budget cost-table
@@ -175,8 +182,17 @@ impl ResolvedRebornLlm {
             provider_id: config.active_provider_id(),
             model: config.active_model_name(),
             config,
+            model_profile_overrides: BTreeMap::new(),
             provider_factory: None,
         }
+    }
+
+    pub fn with_model_profile_overrides(
+        mut self,
+        model_profile_overrides: BTreeMap<String, String>,
+    ) -> Self {
+        self.model_profile_overrides = model_profile_overrides;
+        self
     }
 
     /// Wrap the config-built provider with `factory` before the gateway drives

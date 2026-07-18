@@ -4565,7 +4565,12 @@ async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, R
     // swappable wrapper, not the bare config provider — so a live config reload
     // (which swaps the swappable's inner) keeps the factory's wrapper in the
     // call path. See `wrap_swappable_gateway`.
-    wrap_swappable_gateway(built, session, llm.provider_factory.clone())
+    wrap_swappable_gateway(
+        built,
+        session,
+        &llm.model_profile_overrides,
+        llm.provider_factory.clone(),
+    )
 }
 
 /// Cold-boot gateway: no LLM configured yet. Wraps a placeholder provider (which
@@ -4577,7 +4582,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, session, None)
+    wrap_swappable_gateway(raw, session, &std::collections::BTreeMap::new(), None)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
@@ -4595,6 +4600,7 @@ async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRunti
 fn wrap_swappable_gateway(
     raw: Arc<dyn ironclaw_llm::LlmProvider>,
     session: Arc<ironclaw_llm::SessionManager>,
+    model_profile_overrides: &std::collections::BTreeMap<String, String>,
     provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
@@ -4611,10 +4617,33 @@ fn wrap_swappable_gateway(
         None => swappable_provider,
     };
 
-    let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
-        RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
-    })?;
-    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+    let mut policy = LlmModelProfilePolicy::new();
+    let mut has_interactive_route = false;
+    for (profile_id, model_override) in model_profile_overrides {
+        let model_profile_id = ModelProfileId::new(profile_id).map_err(|reason| {
+            RebornRuntimeError::LlmProvider(format!(
+                "invalid model profile id `{profile_id}`: {reason}"
+            ))
+        })?;
+        let override_value = model_override.trim();
+        let override_value = if override_value.is_empty() {
+            None
+        } else {
+            Some(override_value.to_string())
+        };
+        if profile_id == "interactive_model" {
+            has_interactive_route = true;
+        }
+        policy = policy.allow_model_profile(model_profile_id, override_value);
+    }
+    if !has_interactive_route {
+        let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
+            RebornRuntimeError::LlmProvider(format!(
+                "invalid interactive model profile id: {reason}"
+            ))
+        })?;
+        policy = policy.allow_model_profile(model_profile_id, None);
+    }
     let gateway = LlmProviderModelGateway::new(provider, policy.clone());
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
@@ -6333,7 +6362,13 @@ output_schema_ref = "schemas/write.output.json"
         let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
         let session =
             ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
-        let bundle = super::wrap_swappable_gateway(raw, session, None).expect("gateway bundle");
+        let bundle = super::wrap_swappable_gateway(
+            raw,
+            session,
+            &std::collections::BTreeMap::new(),
+            None,
+        )
+        .expect("gateway bundle");
 
         bundle
             .gateway

@@ -68,6 +68,7 @@ fn flatten_config(
         webui: Some(config.webui.clone().unwrap_or_default()),
         slack: Some(config.slack.clone().unwrap_or_default()),
         budget: Some(config.budget.clone().unwrap_or_default()),
+        nextcloud_talk: Some(config.nextcloud_talk.clone().unwrap_or_default()),
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
     };
 

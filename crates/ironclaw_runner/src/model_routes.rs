@@ -34,7 +34,8 @@ impl ModelSlot {
 
     pub fn from_model_profile_id(model_profile_id: &ModelProfileId) -> Option<Self> {
         match model_profile_id.as_str() {
-            "default" | "default_model" | "interactive_model" => Some(Self::Default),
+            "default" | "default_model" | "interactive_model" | "coding_model"
+            | "vision_model" => Some(Self::Default),
             "mission_model" | "long_running_mission_model" => Some(Self::Mission),
             _ => None,
         }

@@ -12,7 +12,7 @@ use ironclaw_turns::{
     RunProfileVersion,
     run_profile::{
         CapabilitySurfaceProfileId, CheckpointSchemaId, InMemoryRunProfileRegistry,
-        InMemoryRunProfileResolver, RunProfileDefinition, RunProfileRegistryError,
+        InMemoryRunProfileResolver, ModelProfileId, RunProfileDefinition, RunProfileRegistryError,
     },
 };
 
@@ -32,6 +32,7 @@ pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION: u64 = CHECKPOINT_SCHEMA_VERS
 pub const PLANNED_DEFAULT_PROFILE_ID: &str = "reborn-planned-default";
 pub const SUBAGENT_PLANNED_DRIVER_ID: &str = "reborn:planned-subagent";
 pub const SUBAGENT_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent";
+pub const SUBAGENT_CODER_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent-coder";
 /// Capability-surface profile id for the default interactive planned driver.
 const INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID: &str = "interactive_tools";
 pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
@@ -94,6 +95,10 @@ pub fn planned_default_profile_id() -> Result<RunProfileId, String> {
 
 pub fn subagent_planned_profile_id() -> Result<RunProfileId, String> {
     RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID)
+}
+
+pub fn subagent_coder_planned_profile_id() -> Result<RunProfileId, String> {
+    RunProfileId::new(SUBAGENT_CODER_PLANNED_PROFILE_ID)
 }
 
 pub(crate) fn is_subagent_planned_profile(
@@ -272,6 +277,22 @@ pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, Run
     )
 }
 
+pub fn subagent_coder_planned_profile_definition(
+) -> Result<RunProfileDefinition, RunProfileRegistryError> {
+    let descriptor = subagent_planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let profile_id = subagent_coder_planned_profile_id()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let model_profile_id = ModelProfileId::new("coding_model")
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    Ok(planned_like_profile_definition(
+        profile_id,
+        descriptor,
+        SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID,
+    )?
+    .with_model_profile_id(model_profile_id))
+}
+
 /// Dedicated run profile for scheduled-trigger fires (issue #5505). Reuses
 /// the default planned driver/family unchanged — only the capability
 /// surface differs — so `runtime.rs`'s host deny-map can strip the trigger
@@ -299,6 +320,12 @@ pub fn register_subagent_planned_profile(
     registry.register(subagent_planned_profile_definition()?)
 }
 
+pub fn register_subagent_coder_planned_profile(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    registry.register(subagent_coder_planned_profile_definition()?)
+}
+
 pub fn register_scheduled_trigger_planned_profile(
     registry: &mut InMemoryRunProfileRegistry,
 ) -> Result<(), RunProfileRegistryError> {
@@ -310,6 +337,7 @@ pub fn default_planned_run_profile_resolver()
     let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
     register_default_planned_profile(&mut registry)?;
     register_subagent_planned_profile(&mut registry)?;
+    register_subagent_coder_planned_profile(&mut registry)?;
     register_scheduled_trigger_planned_profile(&mut registry)?;
     let implicit_default = planned_default_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
@@ -469,6 +497,29 @@ mod tests {
             snapshot.capability_surface_profile_id.as_str(),
             SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
         );
+        assert_eq!(snapshot.model_profile_id.as_str(), "interactive_model");
+    }
+
+    #[tokio::test]
+    async fn subagent_coder_profile_resolves_to_coding_model_profile() {
+        let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+        register_subagent_coder_planned_profile(&mut registry).expect("profile should register");
+        let resolver = InMemoryRunProfileResolver::new(registry);
+        let snapshot = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                    RunProfileRequest::new(SUBAGENT_CODER_PLANNED_PROFILE_ID).unwrap(),
+                ),
+            )
+            .await
+            .expect("profile should resolve");
+
+        assert_eq!(
+            snapshot.profile_id.as_str(),
+            SUBAGENT_CODER_PLANNED_PROFILE_ID
+        );
+        assert_eq!(snapshot.loop_driver.id.as_str(), SUBAGENT_PLANNED_DRIVER_ID);
+        assert_eq!(snapshot.model_profile_id.as_str(), "coding_model");
     }
 
     #[tokio::test]
