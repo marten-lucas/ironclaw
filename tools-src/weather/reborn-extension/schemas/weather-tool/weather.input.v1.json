@@ -1,0 +1,88 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "weather-tool input",
+    "oneOf": [
+        {
+            "type": "object",
+            "description": "Get current weather conditions for a city",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "const": "get_current"
+                },
+                "city": {
+                    "type": "string",
+                    "description": "City name, e.g. Tokyo"
+                },
+                "country_code": {
+                    "type": "string",
+                    "description": "ISO 3166-1 alpha-2 code, e.g. JP"
+                },
+                "units": {
+                    "type": "string",
+                    "enum": [
+                        "metric",
+                        "imperial"
+                    ]
+                }
+            },
+            "required": [
+                "action",
+                "city"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Get a 5-day daily weather forecast for a city",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "const": "get_forecast"
+                },
+                "city": {
+                    "type": "string"
+                },
+                "country_code": {
+                    "type": "string"
+                },
+                "units": {
+                    "type": "string",
+                    "enum": [
+                        "metric",
+                        "imperial"
+                    ]
+                }
+            },
+            "required": [
+                "action",
+                "city"
+            ],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Get air quality data for a location by coordinates",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "const": "get_air_quality"
+                },
+                "lat": {
+                    "type": "number",
+                    "description": "Latitude (-90 to 90)"
+                },
+                "lon": {
+                    "type": "number",
+                    "description": "Longitude (-180 to 180)"
+                }
+            },
+            "required": [
+                "action",
+                "lat",
+                "lon"
+            ],
+            "additionalProperties": false
+        }
+    ]
+}

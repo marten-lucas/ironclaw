@@ -1,0 +1,26 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "weather-tool"
+name = "Weather Tool"
+version = "0.1.0"
+description = "Get current weather, 5-day forecast, and air quality via Open-Meteo APIs."
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/weather_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "weather-tool.weather"
+description = "Get weather information with actions get_current, get_forecast, or get_air_quality."
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/weather-tool/weather.input.v1.json"
+output_schema_ref = "schemas/weather-tool/weather.output.v1.json"
+prompt_doc_ref = "prompts/weather-tool/weather.md"
