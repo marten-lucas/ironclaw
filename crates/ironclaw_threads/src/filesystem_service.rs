@@ -1499,7 +1499,9 @@ where
         let path = thread_record_path(&scope, &thread_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        if let Some((mut existing, version)) = self.read_thread_versioned(&scope, &thread_id).await? {
+        if let Some((mut existing, version)) =
+            self.read_thread_versioned(&scope, &thread_id).await?
+        {
             if existing.record.scope != scope {
                 return Err(SessionThreadError::ThreadScopeMismatch { thread_id });
             }

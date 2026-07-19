@@ -15,6 +15,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 mod run_action_descriptors;
 
+#[allow(unused_imports)]
 pub use run_action_descriptors::{
     WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RETRY_RUN,
     WEBUI_V2_ROUTE_CANCEL_RUN, WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_RETRY_RUN,
@@ -55,8 +56,7 @@ pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
 pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
 pub const WEBUI_V2_ROUTE_TEST_EXTENSION_CONNECTION: &str = "webui.v2.test_extension_connection";
-pub const WEBUI_V2_ROUTE_SEND_EXTENSION_TEST_MESSAGE: &str =
-    "webui.v2.send_extension_test_message";
+pub const WEBUI_V2_ROUTE_SEND_EXTENSION_TEST_MESSAGE: &str = "webui.v2.send_extension_test_message";
 pub const WEBUI_V2_ROUTE_LIST_SKILLS: &str = "webui.v2.list_skills";
 pub const WEBUI_V2_ROUTE_SEARCH_SKILLS: &str = "webui.v2.search_skills";
 pub const WEBUI_V2_ROUTE_INSTALL_SKILL: &str = "webui.v2.install_skill";

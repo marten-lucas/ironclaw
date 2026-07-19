@@ -333,9 +333,7 @@ pub(super) async fn send_extension_test_message(
     }
 
     Ok(connection_fail(describe_nextcloud_send_http_error(
-        status,
-        &body_text,
-        &room_id,
+        status, &body_text, &room_id,
     )))
 }
 

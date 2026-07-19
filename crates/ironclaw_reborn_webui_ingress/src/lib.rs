@@ -32,7 +32,7 @@ pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
     ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError, YunoHostPortalConfig,
-    webui_v2_auth_router,
+    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,

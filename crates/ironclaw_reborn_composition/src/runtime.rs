@@ -6362,13 +6362,9 @@ output_schema_ref = "schemas/write.output.json"
         let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
         let session =
             ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
-        let bundle = super::wrap_swappable_gateway(
-            raw,
-            session,
-            &std::collections::BTreeMap::new(),
-            None,
-        )
-        .expect("gateway bundle");
+        let bundle =
+            super::wrap_swappable_gateway(raw, session, &std::collections::BTreeMap::new(), None)
+                .expect("gateway bundle");
 
         bundle
             .gateway

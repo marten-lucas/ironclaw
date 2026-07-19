@@ -39,6 +39,12 @@ ignore = [
     # Currently transitive via pdf-extract; remove once pdf-extract/lopdf stack is
     # upgraded to a patched release.
     "RUSTSEC-2026-0187",
+    # rsa timing-sidechannel advisory (RUSTSEC-2023-0071). This crate is pulled
+    # only as a dev-dependency by `ironclaw_reborn_webui_ingress` test code to
+    # generate ephemeral OIDC test keypairs at runtime; it is not shipped in the
+    # production runtime path. Remove once the test helper stack no longer needs
+    # the `rsa` crate.
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]

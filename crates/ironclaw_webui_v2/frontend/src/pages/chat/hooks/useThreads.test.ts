@@ -75,6 +75,7 @@ function instantiate(createThreadRequest, overrides = {}) {
     useQuery: () => ({ data: { threads: [] }, isLoading: false }),
     React: createReactStub(),
     createThreadRequest,
+    clearThreadModelBinding: () => {},
     deleteThreadRequest: async () => {},
     listThreads: async () => ({ threads: [] }),
     normalizeSidebarTitle: (title, threadId) => {

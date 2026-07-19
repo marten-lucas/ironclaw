@@ -481,9 +481,9 @@ fn default_nextcloud_model_profiles() -> std::collections::BTreeMap<String, Stri
 
 fn is_valid_model_profile_name(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -1675,7 +1675,8 @@ model_profiles = { default = "qwen-3.6-9b", coding = "   " }
             .expect_err("empty model profile values must be rejected");
         assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
         assert!(
-            err.to_string().contains("nextcloud_talk.model_profiles.coding"),
+            err.to_string()
+                .contains("nextcloud_talk.model_profiles.coding"),
             "error should identify nextcloud_talk.model_profiles.coding: {err}"
         );
     }

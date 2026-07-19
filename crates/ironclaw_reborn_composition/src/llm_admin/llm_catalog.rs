@@ -136,7 +136,9 @@ pub fn resolve_reborn_runtime_llm(
     })
 }
 
-fn extract_model_profile_overrides(config_file: Option<&RebornConfigFile>) -> BTreeMap<String, String> {
+fn extract_model_profile_overrides(
+    config_file: Option<&RebornConfigFile>,
+) -> BTreeMap<String, String> {
     let mut overrides = BTreeMap::new();
     let Some(nextcloud) = config_file.and_then(|file| file.nextcloud_talk.as_ref()) else {
         return overrides;

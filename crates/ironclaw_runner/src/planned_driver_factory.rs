@@ -277,8 +277,8 @@ pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, Run
     )
 }
 
-pub fn subagent_coder_planned_profile_definition(
-) -> Result<RunProfileDefinition, RunProfileRegistryError> {
+pub fn subagent_coder_planned_profile_definition()
+-> Result<RunProfileDefinition, RunProfileRegistryError> {
     let descriptor = subagent_planned_driver_descriptor()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     let profile_id = subagent_coder_planned_profile_id()

@@ -20,10 +20,10 @@
 //! The CLI builds this struct from env vars / config; it does not call into
 //! `ironclaw_runner` or `ironclaw_llm` directly.
 
-use std::sync::Arc;
-use std::time::Duration;
 #[cfg(feature = "root-llm-provider")]
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};

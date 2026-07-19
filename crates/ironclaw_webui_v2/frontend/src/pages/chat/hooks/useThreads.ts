@@ -4,9 +4,14 @@ import {
   createThread as createThreadRequest,
   deleteThread as deleteThreadRequest,
   listThreads,
-} from "../../../lib/api.js";
-import { queryClient } from "../../../lib/query-client.js";
-import { clearThreadModelBinding } from "../lib/thread-model-bindings.js";
+} from "../../../lib/api";
+import { queryClient } from "../../../lib/query-client";
+import { normalizeSidebarTitle } from "../../../lib/thread-title";
+import { clearThreadModelBinding } from "../lib/thread-model-bindings";
+import {
+  removeThreadList,
+  upsertThreadInCache,
+} from "../lib/thread-cache";
 
 export function useThreads() {
   // No polling: the sidebar is kept current by local cache writes after
