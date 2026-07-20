@@ -474,7 +474,15 @@ impl Agent {
         params: &serde_json::Value,
         job_ctx: &JobContext,
     ) -> Result<String, Error> {
-        execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
+        execute_chat_tool_standalone(
+            self.tools(),
+            self.safety(),
+            self.deps.runtime_policy.as_ref(),
+            tool_name,
+            params,
+            job_ctx,
+        )
+        .await
     }
 }
 
@@ -1205,6 +1213,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 let safety = self.agent.safety().clone();
                 let channels = self.agent.channels.clone();
                 let job_ctx = self.job_ctx.clone();
+                let runtime_policy = self.agent.deps.runtime_policy.clone();
                 let tc = tc.clone();
                 let channel = self.message.channel.clone();
                 let metadata = self.message.metadata.clone();
@@ -1226,6 +1235,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     let result = execute_chat_tool_standalone(
                         &tools,
                         &safety,
+                        runtime_policy.as_ref(),
                         &tc.name,
                         &tc.arguments,
                         &job_ctx,
@@ -1541,6 +1551,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 pub(super) async fn execute_chat_tool_standalone(
     tools: &crate::tools::ToolRegistry,
     safety: &ironclaw_safety::SafetyLayer,
+    runtime_policy: Option<&ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy>,
     tool_name: &str,
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
@@ -1548,6 +1559,7 @@ pub(super) async fn execute_chat_tool_standalone(
     crate::tools::execute::execute_tool_with_safety(
         tools,
         safety,
+        runtime_policy,
         tool_name,
         params.clone(),
         job_ctx,
@@ -2946,6 +2958,7 @@ mod tests {
         let result = super::execute_chat_tool_standalone(
             &registry,
             &safety,
+            None,
             "echo",
             &serde_json::json!({"message": "hello"}),
             &job_ctx,
@@ -2974,6 +2987,7 @@ mod tests {
         let result = super::execute_chat_tool_standalone(
             &registry,
             &safety,
+            None,
             "nonexistent",
             &serde_json::json!({}),
             &job_ctx,

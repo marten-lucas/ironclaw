@@ -7,8 +7,15 @@ export const DEFAULT_WORKSPACE_PATH = "";
 // Unknown future areas deliberately fall back to that id until their owning
 // feature adds a user-facing label.
 export const AREA_DISPLAY_KEYS = {
-  workspace: "workspace.area.home",
-  memory: "workspace.area.memory",
+  identity: "workspace.area.identity",
+  soul: "workspace.area.soul",
+  user: "workspace.area.user",
+  agents: "workspace.area.agents",
+  // Backend mount aliases until dedicated identity/soul/user/agents mounts
+  // are exposed by the browse API.
+  workspace: "workspace.area.user",
+  memory: "workspace.area.soul",
+  skills: "workspace.area.agents",
 };
 
 export function areaDisplayName(areaId, t) {

@@ -3,10 +3,14 @@ import { Navigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { AgentTab } from "./components/agent-tab";
+import { AgentsTab } from "./components/agents-tab";
 import { AppearanceTab } from "./components/appearance-tab";
+import { AuditTab } from "./components/audit-tab";
 import { ChannelsTab } from "./components/channels-tab";
+import { DelegationsTab } from "./components/delegations-tab";
 import { InferenceTab } from "./components/inference-tab";
 import { LanguageTab } from "./components/language-tab";
+import { ModelProfilesTab } from "./components/model-profiles-tab";
 import { NetworkingTab } from "./components/networking-tab";
 import { RestartBanner } from "./components/restart-banner";
 import { SkillsTab } from "./components/skills-tab";
@@ -74,6 +78,10 @@ export function SettingsPage() {
       searchQuery={searchQuery}
     />),
     skills: (<SkillsTab searchQuery={searchQuery} />),
+    modelProfiles: (<ModelProfilesTab searchQuery={searchQuery} />),
+    agents: (<AgentsTab searchQuery={searchQuery} />),
+    delegations: (<DelegationsTab searchQuery={searchQuery} />),
+    audit: (<AuditTab searchQuery={searchQuery} />),
     traces: (<TraceCommonsTab searchQuery={searchQuery} />),
     users: (<UsersTab searchQuery={searchQuery} />),
     language: (<LanguageTab searchQuery={searchQuery} />),

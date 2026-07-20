@@ -41,6 +41,12 @@ mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_delivery;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_egress;
+#[cfg(feature = "webui-v2-beta")]
+mod nextcloud_talk_serve;
 mod observability;
 mod outbound;
 mod product_auth;
@@ -258,30 +264,9 @@ pub use webui::webui_serve::{
 };
 
 #[cfg(feature = "webui-v2-beta")]
-#[derive(Clone, Debug)]
-pub struct NextcloudTalkRouteConfig {
-    pub tenant_id: ironclaw_host_api::TenantId,
-    pub agent_id: ironclaw_host_api::AgentId,
-    pub project_id: Option<ironclaw_host_api::ProjectId>,
-    pub user_id: ironclaw_host_api::UserId,
-    pub extension_id: String,
-    pub webhook_path: String,
-    pub bot_name: String,
-    pub nextcloud_host: Option<String>,
-}
-
-#[cfg(feature = "webui-v2-beta")]
-#[derive(Debug, thiserror::Error)]
-#[error("Nextcloud Talk ingress is not enabled in this composition build")]
-pub struct NextcloudTalkBuildError;
-
-#[cfg(feature = "webui-v2-beta")]
-pub async fn build_nextcloud_talk_route_mount(
-    _runtime: &RebornRuntime,
-    _config: NextcloudTalkRouteConfig,
-) -> Result<PublicRouteMount, NextcloudTalkBuildError> {
-    Err(NextcloudTalkBuildError)
-}
+pub use nextcloud_talk_serve::{
+    NextcloudTalkBuildError, NextcloudTalkRouteConfig, build_nextcloud_talk_route_mount,
+};
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.

@@ -3712,6 +3712,7 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
@@ -3724,9 +3725,90 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/model-profiles")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/model-profiles/default")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"qwen3:32b","temperature":"0.2"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/agents")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/agents/ceo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"display_name":"CEO","role":"orchestrator","default_profile_id":"default","policy_binding_id":"policy/global-safe","status":"active"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/delegations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/settings/audit")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
     assert_eq!(
         *services.list_operator_config_calls.lock().expect("lock"),
-        1
+        5
     );
     assert_eq!(
         services
@@ -3742,6 +3824,20 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
             (
                 "tool.ext.search".to_string(),
                 serde_json::json!({ "state": "always_allow" })
+            ),
+            (
+                "model_profile.default".to_string(),
+                serde_json::json!({ "model": "qwen3:32b", "temperature": "0.2" })
+            ),
+            (
+                "agent.roster.ceo".to_string(),
+                serde_json::json!({
+                    "display_name": "CEO",
+                    "role": "orchestrator",
+                    "default_profile_id": "default",
+                    "policy_binding_id": "policy/global-safe",
+                    "status": "active"
+                })
             )
         ]
     );
@@ -3764,6 +3860,20 @@ async fn settings_tool_routes_fail_closed_without_capabilities_extension() {
             "/api/webchat/v2/settings/tools/ext.search",
             r#"{"state":"always_allow"}"#,
         ),
+        (Method::GET, "/api/webchat/v2/settings/model-profiles", ""),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/model-profiles/default",
+            r#"{"model":"qwen3:32b","temperature":"0.2"}"#,
+        ),
+        (Method::GET, "/api/webchat/v2/settings/agents", ""),
+        (
+            Method::POST,
+            "/api/webchat/v2/settings/agents/ceo",
+            r#"{"display_name":"CEO","role":"orchestrator"}"#,
+        ),
+        (Method::GET, "/api/webchat/v2/settings/delegations", ""),
+        (Method::GET, "/api/webchat/v2/settings/audit", ""),
     ] {
         let mut request = Request::builder().method(method).uri(uri);
         if !body.is_empty() {

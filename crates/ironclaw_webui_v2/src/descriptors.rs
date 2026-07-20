@@ -70,6 +70,15 @@ pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE: &str =
     "webui.v2.settings.set_tools_auto_approve";
 pub const WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION: &str =
     "webui.v2.settings.set_tool_permission";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_MODEL_PROFILES: &str =
+    "webui.v2.settings.list_model_profiles";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_MODEL_PROFILE: &str =
+    "webui.v2.settings.upsert_model_profile";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_AGENTS: &str = "webui.v2.settings.list_agents";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_AGENT: &str = "webui.v2.settings.upsert_agent";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_DELEGATIONS: &str =
+    "webui.v2.settings.list_delegations";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_AUDIT: &str = "webui.v2.settings.list_audit";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -178,6 +187,16 @@ pub const WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED: &str =
 pub const WEBUI_V2_PATTERN_SETTINGS_TOOLS: &str = "/api/webchat/v2/settings/tools";
 pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION: &str =
     "/api/webchat/v2/settings/tools/{capability_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES: &str =
+    "/api/webchat/v2/settings/model-profiles";
+pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL: &str =
+    "/api/webchat/v2/settings/model-profiles/{profile_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_AGENTS: &str = "/api/webchat/v2/settings/agents";
+pub const WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL: &str =
+    "/api/webchat/v2/settings/agents/{agent_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS: &str =
+    "/api/webchat/v2/settings/delegations";
+pub const WEBUI_V2_PATTERN_SETTINGS_AUDIT: &str = "/api/webchat/v2/settings/audit";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -268,6 +287,12 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_settings_tools_descriptor(),
         set_settings_tools_auto_approve_descriptor(),
         set_settings_tool_permission_descriptor(),
+        list_settings_model_profiles_descriptor(),
+        upsert_settings_model_profile_descriptor(),
+        list_settings_agents_descriptor(),
+        upsert_settings_agent_descriptor(),
+        list_settings_delegations_descriptor(),
+        list_settings_audit_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -1337,6 +1362,90 @@ fn set_settings_tool_permission_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_settings_model_profiles_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_MODEL_PROFILES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_settings_model_profile_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_MODEL_PROFILE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_settings_agents_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_AGENTS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_AGENTS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_settings_agent_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_AGENT,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_settings_delegations_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_DELEGATIONS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn list_settings_audit_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_AUDIT,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_AUDIT,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
         ),
     )
 }

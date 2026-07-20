@@ -40,6 +40,9 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN,
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
+    WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL, WEBUI_V2_PATTERN_SETTINGS_AGENTS,
+    WEBUI_V2_PATTERN_SETTINGS_AUDIT, WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS,
+    WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL, WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES,
     WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SETUP_TEST_CONNECTION,
     WEBUI_V2_PATTERN_SETUP_TEST_MESSAGE, WEBUI_V2_PATTERN_SKILL_DETAIL,
@@ -320,6 +323,27 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
             post(handlers::set_settings_tool_permission),
         )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES,
+            get(handlers::list_settings_model_profiles),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL,
+            post(handlers::upsert_settings_model_profile),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_AGENTS,
+            get(handlers::list_settings_agents),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL,
+            post(handlers::upsert_settings_agent),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS,
+            get(handlers::list_settings_delegations),
+        )
+        .route(WEBUI_V2_PATTERN_SETTINGS_AUDIT, get(handlers::list_settings_audit))
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
             get(handlers::list_extension_registry),

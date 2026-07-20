@@ -217,6 +217,7 @@ pub use reborn_services::{
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornStreamEventsSubscription,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,

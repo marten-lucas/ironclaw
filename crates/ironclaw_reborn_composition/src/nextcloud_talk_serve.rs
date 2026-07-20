@@ -1,6 +1,9 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -12,7 +15,7 @@ use axum::{
     routing::post,
 };
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
     CredentialAccountSelectionRequest,
@@ -38,11 +41,14 @@ use ironclaw_product_adapters::inbound::{
     ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
     UserMessagePayload,
 };
-use ironclaw_product_adapters::{ProductTriggerReason, ProductWorkflow};
+use ironclaw_product_adapters::{
+    ProductAdapterError, ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind,
+};
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolvedProductActorUser,
     ResolveBindingRequest,
     StaticProductInstallationResolver,
 };
@@ -63,10 +69,10 @@ use crate::nextcloud_delivery::{
     NextcloudDeliveryTask, NextcloudTalkFinalReplyDriver, RuntimeCredentialNextcloudEgressProvider,
 };
 use crate::nextcloud_egress::NextcloudProtocolHttpEgress;
-use crate::product_auth_runtime_credentials::{
+use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
 };
-use crate::webui_serve::PublicRouteMount;
+use crate::webui::webui_serve::PublicRouteMount;
 use ironclaw_product_adapters::{DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle};
 use ironclaw_wasm_product_adapters::EgressPolicy;
 use ironclaw_threads::EnsureThreadRequest;
@@ -100,6 +106,9 @@ pub struct NextcloudTalkRouteConfig {
     /// Outbound host is resolved from the UI/setup credential
     /// `nextcloud_talk_base_url` to keep a single source of truth.
     pub nextcloud_host: Option<String>,
+    /// Channel-local profile -> model mapping used for ingress model routing.
+    /// Must include `default`.
+    pub model_profiles: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Error)]
@@ -116,6 +125,18 @@ pub async fn build_nextcloud_talk_route_mount(
     runtime: &RebornRuntime,
     config: NextcloudTalkRouteConfig,
 ) -> Result<PublicRouteMount, NextcloudTalkBuildError> {
+    let has_default_profile = config
+        .model_profiles
+        .get("default")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if !has_default_profile {
+        return Err(NextcloudTalkBuildError::InvalidConfig {
+            field: "model_profiles.default",
+            reason: "nextcloud model profile map must include non-empty `default`".to_string(),
+        });
+    }
+
     let local_runtime = runtime
         .services()
         .local_runtime
@@ -266,6 +287,7 @@ pub async fn build_nextcloud_talk_route_mount(
         agent_id: config.agent_id,
         project_id: config.project_id,
         user_id: config.user_id,
+        model_profiles: config.model_profiles,
         thread_service,
         binding_service: delivery_binding,
         delivery_driver,
@@ -305,6 +327,7 @@ struct NextcloudTalkRouteState {
     agent_id: AgentId,
     project_id: Option<ProjectId>,
     user_id: UserId,
+    model_profiles: BTreeMap<String, String>,
     thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     binding_service: Arc<dyn ironclaw_product_workflow::ConversationBindingService>,
     /// Outbound delivery driver: (driver, nextcloud_host, credential_handle).
@@ -430,6 +453,10 @@ struct TalkObject {
     room_name: Option<String>,
     #[serde(default, deserialize_with = "de_opt_string")]
     content: Option<String>,
+    #[serde(default, rename = "roomType", alias = "room_type", alias = "conversationType", deserialize_with = "de_opt_string")]
+    room_type: Option<String>,
+    #[serde(default, rename = "participantCount", alias = "participants", alias = "attendeeCount", alias = "participant_count", deserialize_with = "de_opt_u32")]
+    participant_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,6 +465,10 @@ struct TalkTarget {
     id: Option<String>,
     #[serde(default, alias = "name", alias = "displayName", alias = "display_name", alias = "roomName", alias = "room_name", deserialize_with = "de_opt_string")]
     room_name: Option<String>,
+    #[serde(default, rename = "roomType", alias = "room_type", alias = "conversationType", alias = "type", deserialize_with = "de_opt_string")]
+    room_type: Option<String>,
+    #[serde(default, rename = "participantCount", alias = "participants", alias = "attendeeCount", alias = "participant_count", deserialize_with = "de_opt_u32")]
+    participant_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -480,6 +511,18 @@ where
     let value = Option::<Value>::deserialize(deserializer)?;
     Ok(match value {
         Some(Value::Object(map)) => serde_json::from_value::<T>(Value::Object(map)).ok(),
+        _ => None,
+    })
+}
+
+fn de_opt_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(Value::Number(number)) => number.as_u64().and_then(|raw| u32::try_from(raw).ok()),
+        Some(Value::String(text)) => text.trim().parse::<u32>().ok(),
         _ => None,
     })
 }
@@ -610,7 +653,7 @@ async fn nextcloud_talk_handler(
         }
     };
 
-    let parsed = match parse_talk_event(&event, &resolved_bot_name) {
+    let parsed = match parse_talk_event(&event, &resolved_bot_name, &state.model_profiles) {
         Ok(Some(value)) => value,
         Ok(None) => return (StatusCode::OK, "ok").into_response(),
         Err(_) => {
@@ -710,20 +753,33 @@ async fn nextcloud_talk_handler(
             (StatusCode::OK, "ok").into_response()
         }
         Err(error) => {
+            let (status, error_code) = map_workflow_rejection_to_webhook_response(&error);
             tracing::warn!(
                 target = "ironclaw::reborn::nextcloud_talk",
                 webhook_path = %state.webhook_path,
                 error = %error,
                 "nextcloud talk webhook rejected",
             );
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(NextcloudErrorBody {
-                    error: "workflow_unavailable",
-                }),
-            )
-                .into_response()
+            (status, Json(NextcloudErrorBody { error: error_code })).into_response()
         }
+    }
+}
+
+fn map_workflow_rejection_to_webhook_response(error: &ProductAdapterError) -> (StatusCode, &'static str) {
+    match error {
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::Unauthorized
+                | ProductWorkflowRejectionKind::AdmissionRejected,
+            ..
+        }
+        | ProductAdapterError::Authentication(_) => (StatusCode::FORBIDDEN, "policy_denied"),
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest
+                | ProductWorkflowRejectionKind::ScopeNotFound,
+            ..
+        }
+        | ProductAdapterError::MalformedInboundPayload { .. } => (StatusCode::BAD_REQUEST, "invalid_payload"),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "workflow_unavailable"),
     }
 }
 
@@ -1155,7 +1211,7 @@ fn verify_nextcloud_signature(secret: &str, random: &str, body: &[u8], signature
     };
     mac.update(random.trim().as_bytes());
     mac.update(body);
-    let expected = format!("{:x}", mac.finalize().into_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
 
     if expected.len() != provided.len() {
         return false;
@@ -1239,7 +1295,7 @@ fn verify_bridge_signature(
     mac.update(nonce.as_bytes());
     mac.update(b"\n");
     mac.update(body);
-    let expected = format!("{:x}", mac.finalize().into_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
 
     if expected.len() != provided.len() {
         return Err("invalid_signature");
@@ -1272,6 +1328,7 @@ fn normalize_nextcloud_signature(signature: &str) -> Option<String> {
 fn parse_talk_event(
     event: &TalkEvent,
     bot_name: &str,
+    model_profiles: &BTreeMap<String, String>,
 ) -> Result<Option<ParsedTalkInbound>, ProductWorkflowError> {
     if event.event_type != "Create" || is_bot_authored(event) {
         return Ok(None);
@@ -1300,9 +1357,16 @@ fn parse_talk_event(
     if rendered.is_empty() {
         return Ok(None);
     }
+    if !event_mentions_bot(event, bot_name, &rendered) {
+        return Ok(None);
+    }
 
     let prompt = sanitize_prompt_from_bridge_or_text(event, &rendered, bot_name);
     let text = if prompt.is_empty() { rendered } else { prompt };
+    let (text, requested_model) = resolve_requested_model_for_nextcloud_message(&text, model_profiles)?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
     let message_id = event
         .object
         .as_ref()
@@ -1312,7 +1376,9 @@ fn parse_talk_event(
         .unwrap_or_else(|| format!("create:{room_token}:{actor_id}"));
 
     let payload = ProductInboundPayload::UserMessage(
-        UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat).map_err(
+        UserMessagePayload::new(text, vec![], ProductTriggerReason::DirectChat)
+            .map(|payload| payload.with_requested_model(Some(requested_model)))
+            .map_err(
             |error| ProductWorkflowError::InvalidBindingRequest {
                 reason: error.to_string(),
             },
@@ -1348,6 +1414,60 @@ fn parse_talk_event(
         inbound: parsed,
         room_name: extract_room_name(event),
     }))
+}
+
+fn resolve_requested_model_for_nextcloud_message(
+    text: &str,
+    model_profiles: &BTreeMap<String, String>,
+) -> Result<(String, String), ProductWorkflowError> {
+    let default_model = model_profiles
+        .get("default")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
+            reason: "nextcloud model profile map is missing `default`".to_string(),
+        })?
+        .to_string();
+
+    let (requested_profile, stripped_text) = extract_profile_directive(text);
+    let requested_model = requested_profile
+        .as_deref()
+        .and_then(|profile| model_profiles.get(profile))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_model);
+
+    Ok((stripped_text, requested_model))
+}
+
+fn extract_profile_directive(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("/profile") {
+        let rest = rest.trim_start();
+        if rest.is_empty() {
+            return (None, trimmed.to_string());
+        }
+        let boundary = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let profile = rest[..boundary].trim().to_ascii_lowercase();
+        let remainder = rest[boundary..].trim_start().to_string();
+        if profile.is_empty() {
+            return (None, trimmed.to_string());
+        }
+        return (Some(profile), remainder);
+    }
+
+    if let Some(after_open) = trimmed.strip_prefix("[profile:")
+        && let Some(close_index) = after_open.find(']')
+    {
+        let profile = after_open[..close_index].trim().to_ascii_lowercase();
+        let remainder = after_open[close_index + 1..].trim_start().to_string();
+        if profile.is_empty() {
+            return (None, trimmed.to_string());
+        }
+        return (Some(profile), remainder);
+    }
+
+    (None, trimmed.to_string())
 }
 
 fn extract_room_token(event: &TalkEvent) -> Option<String> {
@@ -1419,6 +1539,63 @@ fn sanitize_prompt_from_bridge_or_text(event: &TalkEvent, rendered: &str, bot_na
         .map(|message| strip_bot_mention_entities(&source, &message.mention_entities))
         .unwrap_or(source);
     sanitize_prompt(&from_entities, bot_name)
+}
+
+fn event_mentions_bot(event: &TalkEvent, bot_name: &str, rendered: &str) -> bool {
+    if is_direct_or_two_party_context(event) {
+        return true;
+    }
+
+    if extract_declared_reply_user_id(event).is_some() {
+        return true;
+    }
+
+    if event
+        .bridge_message
+        .as_ref()
+        .map(|message| message.mention_entities.iter().any(|entity| entity.is_bot))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let source = event
+        .bridge_message
+        .as_ref()
+        .and_then(|message| non_empty_trimmed(message.raw.as_deref()))
+        .unwrap_or_else(|| rendered.to_string());
+    let trimmed_source = source.trim();
+    if trimmed_source.is_empty() {
+        return false;
+    }
+
+    if let Some(token) = mention_token(bot_name) {
+        if trimmed_source.to_ascii_lowercase().contains(&token.to_ascii_lowercase()) {
+            return true;
+        }
+    }
+
+    let addressed = strip_leading_bot_addressing(trimmed_source, bot_name);
+    addressed != trimmed_source
+}
+
+fn is_direct_or_two_party_context(event: &TalkEvent) -> bool {
+    let room_type = event
+        .target
+        .as_ref()
+        .and_then(|target| target.room_type.as_deref())
+        .or_else(|| event.object.as_ref().and_then(|obj| obj.room_type.as_deref()))
+        .map(|value| value.trim().to_ascii_lowercase());
+    if matches!(room_type.as_deref(), Some("one_to_one" | "one-to-one" | "direct" | "direct_message" | "dm" | "1on1" | "one2one")) {
+        return true;
+    }
+
+    let participants = event
+        .target
+        .as_ref()
+        .and_then(|target| target.participant_count)
+        .or_else(|| event.object.as_ref().and_then(|obj| obj.participant_count));
+    matches!(participants, Some(count) if count <= 2)
 }
 
 fn strip_bot_mention_entities(text: &str, entities: &[TalkMentionEntity]) -> String {
@@ -1558,8 +1735,8 @@ impl ProductActorUserResolver for StaticNextcloudActorResolver {
     async fn resolve_product_actor_user(
         &self,
         _request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
-        Ok(Some(self.user_id.clone()))
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        Ok(Some(ResolvedProductActorUser::new(self.user_id.clone())))
     }
 }
 
@@ -1572,7 +1749,7 @@ mod tests {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac init");
         mac.update(random.as_bytes());
         mac.update(body);
-        format!("{:x}", mac.finalize().into_bytes())
+        hex::encode(mac.finalize().into_bytes())
     }
 
     #[test]
@@ -1633,9 +1810,17 @@ mod tests {
             ProductInboundPayload::UserMessage(payload) => {
                 assert_eq!(payload.text, expected_text);
                 assert_eq!(payload.trigger, expected_trigger);
+                assert_eq!(payload.requested_model.as_deref(), Some("model/default"));
             }
             other => panic!("expected user message payload, got {other:?}"),
         }
+    }
+
+    fn default_model_profiles() -> BTreeMap<String, String> {
+        let mut profiles = BTreeMap::new();
+        profiles.insert("default".to_string(), "model/default".to_string());
+        profiles.insert("coding".to_string(), "model/coding".to_string());
+        profiles
     }
 
     #[test]
@@ -1651,18 +1836,22 @@ mod tests {
                 id: Some("42".to_string()),
                 room_name: None,
                 content: Some("@ironclaw please summarize this".to_string()),
+                room_type: None,
+                participant_count: None,
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
+                room_type: None,
+                participant_count: None,
             }),
             mention: None,
             bridge_message: None,
         };
 
-        let parsed = parse_talk_event(&event, "ironclaw")
+        let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
             .expect("parse result")
-            .expect("mentioned messages must produce inbound payload");
+            .expect("messages that mention the bot must produce inbound payload");
         assert_user_message_payload(
             parsed,
             "please summarize this",
@@ -1671,7 +1860,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_talk_event_accepts_create_without_mention() {
+    fn parse_talk_event_ignores_create_without_mention() {
         let event = TalkEvent {
             event_type: "Create".to_string(),
             actor: Some(TalkActor {
@@ -1683,22 +1872,24 @@ mod tests {
                 id: Some("42".to_string()),
                 room_name: None,
                 content: Some("please summarize this".to_string()),
+                room_type: None,
+                participant_count: None,
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
+                room_type: None,
+                participant_count: None,
             }),
             mention: None,
             bridge_message: None,
         };
 
-        let parsed = parse_talk_event(&event, "ironclaw")
-            .expect("parse result")
-            .expect("non-mentioned messages must now be accepted");
-        assert_user_message_payload(
-            parsed,
-            "please summarize this",
-            ProductTriggerReason::DirectChat,
+        let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
+            .expect("parse result");
+        assert!(
+            parsed.is_none(),
+            "messages without bot mention must be ignored"
         );
     }
 
@@ -1715,16 +1906,22 @@ mod tests {
                 id: Some(" ".to_string()),
                 room_name: None,
                 content: Some("test 12:16".to_string()),
+                room_type: None,
+                participant_count: None,
             }),
             target: Some(TalkTarget {
                 id: Some("3pjrvc7d".to_string()),
                 room_name: None,
+                room_type: None,
+                participant_count: None,
             }),
-            mention: None,
+            mention: Some(TalkMention {
+                user_id: Some("ki_assistant".to_string()),
+            }),
             bridge_message: None,
         };
 
-        let parsed = parse_talk_event(&event, "ki_assistant")
+        let parsed = parse_talk_event(&event, "ki_assistant", &default_model_profiles())
             .expect("parse result")
             .expect("blank actor/message ids should fall back instead of failing");
 
@@ -1761,16 +1958,21 @@ mod tests {
                 id: Some("42".to_string()),
                 room_name: None,
                 content: Some("@ironclaw loop me".to_string()),
+                room_type: None,
+                participant_count: None,
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
+                room_type: None,
+                participant_count: None,
             }),
             mention: None,
             bridge_message: None,
         };
 
-        let parsed = parse_talk_event(&event, "ironclaw").expect("parse result");
+        let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
+            .expect("parse result");
         assert!(parsed.is_none(), "bot-authored messages must be ignored");
     }
 
@@ -1787,10 +1989,14 @@ mod tests {
                 id: Some("901".to_string()),
                 room_name: None,
                 content: Some("@KI Gerda @ki_assistant Es ist 10:01. antworte mit OK".to_string()),
+                room_type: None,
+                participant_count: None,
             }),
             target: Some(TalkTarget {
                 id: Some("room-alpha".to_string()),
                 room_name: None,
+                room_type: None,
+                participant_count: None,
             }),
             mention: None,
             bridge_message: Some(TalkBridgeMessage {
@@ -1812,11 +2018,143 @@ mod tests {
             }),
         };
 
-        let parsed = parse_talk_event(&event, "KI Gerda")
+        let parsed = parse_talk_event(&event, "KI Gerda", &default_model_profiles())
             .expect("parse result")
             .expect("bridge mention entities should still produce inbound payload");
 
         assert_user_message_payload(parsed, "Es ist 10:01. antworte mit OK", ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn parse_talk_event_accepts_direct_message_without_mention() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("user-123".to_string()),
+                name: Some("Marten".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("321".to_string()),
+                room_name: None,
+                content: Some("bitte kurz zusammenfassen".to_string()),
+                room_type: Some("direct".to_string()),
+                participant_count: None,
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-dm".to_string()),
+                room_name: None,
+                room_type: Some("direct".to_string()),
+                participant_count: None,
+            }),
+            mention: None,
+            bridge_message: None,
+        };
+
+        let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
+            .expect("parse result")
+            .expect("direct messages should not require explicit mention");
+        assert_user_message_payload(parsed, "bitte kurz zusammenfassen", ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn parse_talk_event_accepts_two_party_room_without_mention() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("user-123".to_string()),
+                name: Some("Marten".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("322".to_string()),
+                room_name: Some("Teamraum".to_string()),
+                content: Some("status?".to_string()),
+                room_type: None,
+                participant_count: None,
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-two-party".to_string()),
+                room_name: Some("Teamraum".to_string()),
+                room_type: None,
+                participant_count: Some(2),
+            }),
+            mention: None,
+            bridge_message: None,
+        };
+
+        let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
+            .expect("parse result")
+            .expect("two-party rooms should not require explicit mention");
+        assert_user_message_payload(parsed, "status?", ProductTriggerReason::DirectChat);
+    }
+
+    #[test]
+    fn parse_talk_event_routes_profile_directive_to_mapped_model() {
+        let event = TalkEvent {
+            event_type: "Create".to_string(),
+            actor: Some(TalkActor {
+                actor_type: Some("users".to_string()),
+                id: Some("user-123".to_string()),
+                name: Some("Marten".to_string()),
+            }),
+            object: Some(TalkObject {
+                id: Some("323".to_string()),
+                room_name: None,
+                content: Some("/profile coding bitte refactoren".to_string()),
+                room_type: Some("direct".to_string()),
+                participant_count: None,
+            }),
+            target: Some(TalkTarget {
+                id: Some("room-dm".to_string()),
+                room_name: None,
+                room_type: Some("direct".to_string()),
+                participant_count: None,
+            }),
+            mention: None,
+            bridge_message: None,
+        };
+
+        let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
+            .expect("parse result")
+            .expect("profile directive should still produce inbound payload");
+
+        match parsed.inbound.payload {
+            ProductInboundPayload::UserMessage(payload) => {
+                assert_eq!(payload.text, "bitte refactoren");
+                assert_eq!(payload.requested_model.as_deref(), Some("model/coding"));
+            }
+            other => panic!("expected user message payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn profile_directive_falls_back_to_default_for_unknown_profile() {
+        let (cleaned_text, requested_model) = resolve_requested_model_for_nextcloud_message(
+            "/profile unknown bitte antworten",
+            &default_model_profiles(),
+        )
+        .expect("profile resolution should succeed");
+
+        assert_eq!(cleaned_text, "bitte antworten");
+        assert_eq!(requested_model, "model/default");
+    }
+
+    #[test]
+    fn permanent_policy_rejection_maps_to_forbidden() {
+        let (status, error_code) = map_workflow_rejection_to_webhook_response(
+            &ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::AdmissionRejected,
+                status_code: 403,
+                retryable: false,
+                reason: ironclaw_product_adapters::redaction::RedactedString::new(
+                    "blocked by policy",
+                ),
+            },
+        );
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(error_code, "policy_denied");
     }
 
     #[test]
@@ -1832,7 +2170,7 @@ mod tests {
         mac.update(nonce.as_bytes());
         mac.update(b"\n");
         mac.update(body);
-        let signature = format!("{:x}", mac.finalize().into_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1881,7 +2219,7 @@ mod tests {
         mac.update(nonce.as_bytes());
         mac.update(b"\n");
         mac.update(body);
-        let signature = format!("{:x}", mac.finalize().into_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
 
         let mut headers = HeaderMap::new();
         headers.insert(

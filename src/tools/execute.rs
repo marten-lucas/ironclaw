@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::tools::{ToolRegistry, prepare_tool_params, redact_params};
+use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_llm::ChatMessage;
 use ironclaw_safety::SafetyLayer;
 
@@ -20,6 +21,7 @@ use ironclaw_safety::SafetyLayer;
 pub async fn execute_tool_with_safety(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
+    runtime_policy: Option<&EffectiveRuntimePolicy>,
     tool_name: &str,
     params: serde_json::Value,
     job_ctx: &JobContext,
@@ -36,6 +38,8 @@ pub async fn execute_tool_with_safety(
         .ok_or_else(|| crate::error::ToolError::NotFound {
             name: tool_name.to_string(),
         })?;
+
+    enforce_runtime_policy(tool.as_ref(), runtime_policy, tool_name)?;
 
     let normalized_params = prepare_tool_params(tool.as_ref(), &params);
 
@@ -146,13 +150,37 @@ pub fn process_tool_result(
 pub async fn execute_tool_simple(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
+    runtime_policy: Option<&EffectiveRuntimePolicy>,
     tool_name: &str,
     params: serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, String> {
-    execute_tool_with_safety(tools, safety, tool_name, params, job_ctx)
+    execute_tool_with_safety(tools, safety, runtime_policy, tool_name, params, job_ctx)
         .await
         .map_err(|e| e.to_string())
+}
+
+fn enforce_runtime_policy(
+    tool: &dyn crate::tools::Tool,
+    runtime_policy: Option<&EffectiveRuntimePolicy>,
+    tool_name: &str,
+) -> Result<(), Error> {
+    let Some(policy) = runtime_policy else {
+        return Ok(());
+    };
+
+    if crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance()) {
+        return Ok(());
+    }
+
+    Err(crate::error::ToolError::AutonomousUnavailable {
+        name: tool_name.to_string(),
+        reason: format!(
+            "Tool '{}' is not allowed under the resolved runtime policy",
+            tool_name
+        ),
+    }
+    .into())
 }
 
 #[cfg(test)]
@@ -276,6 +304,34 @@ mod tests {
         }
     }
 
+    struct LocalShellTool;
+
+    #[async_trait::async_trait]
+    impl Tool for LocalShellTool {
+        fn name(&self) -> &str {
+            "local_shell_tool"
+        }
+        fn description(&self) -> &str {
+            "Local shell only"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            panic!("policy gate should block before execution")
+        }
+        fn runtime_affordance(&self) -> crate::tools::ToolRuntimeAffordance {
+            crate::tools::ToolRuntimeAffordance::LocalShell
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
     fn test_safety() -> SafetyLayer {
         SafetyLayer::new(&crate::config::SafetyConfig {
             max_output_length: 100_000,
@@ -285,6 +341,21 @@ mod tests {
 
     fn test_job_ctx() -> JobContext {
         JobContext::default()
+    }
+
+    fn test_runtime_policy() -> EffectiveRuntimePolicy {
+        EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::SecureDefault,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::SecureDefault,
+            filesystem_backend:
+                ironclaw_host_api::runtime_policy::FilesystemBackendKind::ScopedVirtual,
+            process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
+            secret_mode: ironclaw_host_api::runtime_policy::SecretMode::BrokeredHandles,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::LocalMinimal,
+        }
     }
 
     async fn registry_with(tools: Vec<Arc<dyn Tool>>) -> ToolRegistry {
@@ -305,6 +376,7 @@ mod tests {
         let result = execute_tool_with_safety(
             &registry,
             &safety,
+            None,
             "",
             serde_json::json!({}),
             &test_job_ctx(),
@@ -329,7 +401,7 @@ mod tests {
         let params = serde_json::json!({"message": "hello"});
 
         let result =
-            execute_tool_with_safety(&registry, &safety, "echo", params, &test_job_ctx()).await;
+            execute_tool_with_safety(&registry, &safety, None, "echo", params, &test_job_ctx()).await;
 
         assert!(result.is_ok(), "Echo tool should succeed");
         let output = result.unwrap();
@@ -347,6 +419,7 @@ mod tests {
         let result = execute_tool_with_safety(
             &registry,
             &safety,
+            None,
             "nonexistent",
             serde_json::json!({}),
             &test_job_ctx(),
@@ -370,6 +443,7 @@ mod tests {
         let result = execute_tool_with_safety(
             &registry,
             &safety,
+            None,
             "fail_tool",
             serde_json::json!({}),
             &test_job_ctx(),
@@ -394,6 +468,7 @@ mod tests {
         let result = execute_tool_with_safety(
             &registry,
             &safety,
+            None,
             "slow_tool",
             serde_json::json!({}),
             &test_job_ctx(),
@@ -422,6 +497,7 @@ mod tests {
         let result = execute_tool_with_safety(
             &registry,
             &safety,
+            None,
             "array_echo",
             serde_json::json!({"values": "[\"1\", \"2\", 3]"}),
             &test_job_ctx(),
@@ -432,6 +508,30 @@ mod tests {
         let output: serde_json::Value =
             serde_json::from_str(&result).expect("tool result should be valid JSON"); // safety: test-only assertion
         assert_eq!(output["values"], serde_json::json!([1, 2, 3])); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_execute_blocks_tool_hidden_by_runtime_policy() {
+        let registry = registry_with(vec![Arc::new(LocalShellTool)]).await;
+        let safety = test_safety();
+        let policy = test_runtime_policy();
+
+        let result = execute_tool_with_safety(
+            &registry,
+            &safety,
+            Some(&policy),
+            "local_shell_tool",
+            serde_json::json!({}),
+            &test_job_ctx(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::Tool(
+                crate::error::ToolError::AutonomousUnavailable { .. }
+            ))
+        ));
     }
 
     #[test]

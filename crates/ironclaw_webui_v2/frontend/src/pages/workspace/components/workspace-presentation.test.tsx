@@ -11,8 +11,9 @@ vi.mock("../../../lib/i18n", () => ({
   useI18n: () => ({ lang: "de" }),
   useT: () => (key: string, params: Record<string, string> = {}) => {
     const labels: Record<string, string> = {
-      "workspace.area.home": "Start",
-      "workspace.area.memory": "Speicher",
+      "workspace.area.user": "Nutzer",
+      "workspace.area.soul": "Seele",
+      "workspace.area.agents": "Agenten",
       "workspace.fileMeta": "{mime} · {size}",
     };
     return (labels[key] || key)
@@ -30,6 +31,7 @@ test("workspace tree renders localized area labels instead of backend ids", () =
       entries={[
         { name: "workspace", path: "workspace", is_dir: true },
         { name: "memory", path: "memory", is_dir: true },
+        { name: "skills", path: "skills", is_dir: true },
       ]}
       selectedPath=""
       expandedPaths={new Set()}
@@ -40,10 +42,12 @@ test("workspace tree renders localized area labels instead of backend ids", () =
     />,
   );
 
-  assert.match(html, />Start</);
-  assert.match(html, />Speicher</);
+  assert.match(html, />Nutzer</);
+  assert.match(html, />Seele</);
+  assert.match(html, />Agenten</);
   assert.doesNotMatch(html, />workspace</);
   assert.doesNotMatch(html, />memory</);
+  assert.doesNotMatch(html, />skills</);
 });
 
 test("workspace viewer renders a locale-aware human-readable file size", () => {

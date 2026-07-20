@@ -78,8 +78,16 @@ use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(250);
 const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
+const SETTINGS_MODEL_PROFILE_CONFIG_PREFIX: &str = "model_profile.";
+const SETTINGS_AGENT_CONFIG_PREFIX: &str = "agent.roster.";
+const SETTINGS_DELEGATION_CONFIG_PREFIX: &str = "delegation.";
+const SETTINGS_AUDIT_CONFIG_PREFIX: &str = "audit.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
+const SETTINGS_MODEL_PROFILE_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_MODEL_PROFILE_CONFIG_PREFIX.len();
+const SETTINGS_AGENT_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_AGENT_CONFIG_PREFIX.len();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -1852,6 +1860,136 @@ pub async fn set_settings_tool_permission(
     Ok(Json(response))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SettingsModelProfilePath {
+    pub profile_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SettingsModelProfileUpsertRequest {
+    pub model: String,
+    #[serde(default)]
+    pub temperature: Option<String>,
+}
+
+/// `GET /api/webchat/v2/settings/model-profiles`
+pub async fn list_settings_model_profiles(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_MODEL_PROFILE_CONFIG_PREFIX));
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/model-profiles/{profile_id}`
+pub async fn upsert_settings_model_profile(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsModelProfilePath { profile_id }): Path<SettingsModelProfilePath>,
+    Json(body): Json<SettingsModelProfileUpsertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("profile_id", &profile_id, SETTINGS_MODEL_PROFILE_ID_MAX_BYTES)?;
+    let key = validate_operator_config_key(format!(
+        "{SETTINGS_MODEL_PROFILE_CONFIG_PREFIX}{profile_id}"
+    ))?;
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller,
+            key,
+            RebornOperatorConfigSetRequest {
+                value: serde_json::to_value(body)
+                    .map_err(RebornServicesError::internal_from)?,
+            },
+        )
+        .await?;
+    if response
+        .entry
+        .key
+        .starts_with(SETTINGS_MODEL_PROFILE_CONFIG_PREFIX)
+    {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsAgentPath {
+    pub agent_id: String,
+}
+
+/// `GET /api/webchat/v2/settings/agents`
+pub async fn list_settings_agents(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_AGENT_CONFIG_PREFIX));
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/agents/{agent_id}`
+pub async fn upsert_settings_agent(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsAgentPath { agent_id }): Path<SettingsAgentPath>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("agent_id", &agent_id, SETTINGS_AGENT_ID_MAX_BYTES)?;
+    let key = validate_operator_config_key(format!("{SETTINGS_AGENT_CONFIG_PREFIX}{agent_id}"))?;
+    let response = state
+        .services()
+        .set_operator_config_key(caller, key, RebornOperatorConfigSetRequest { value: body })
+        .await?;
+    if response.entry.key.starts_with(SETTINGS_AGENT_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `GET /api/webchat/v2/settings/delegations`
+pub async fn list_settings_delegations(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_DELEGATION_CONFIG_PREFIX));
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/settings/audit`
+pub async fn list_settings_audit(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_AUDIT_CONFIG_PREFIX));
+    Ok(Json(response))
+}
+
 fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
     if capability_id.len() > SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES {
         return Err(RebornServicesError::from(WebUiInboundValidationError::new(
@@ -1861,6 +1999,29 @@ fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUi
         .into());
     }
     Ok(())
+}
+
+fn validate_settings_config_entity_id(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), WebUiV2HttpError> {
+    let code = if value.is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if value.len() > max_bytes {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else if value.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+    }) {
+        None
+    } else {
+        Some(WebUiInboundValidationCode::InvalidValue)
+    };
+
+    match code {
+        None => Ok(()),
+        Some(code) => Err(RebornServicesError::from(WebUiInboundValidationError::new(field, code)).into()),
+    }
 }
 
 fn validate_settings_tool_config_response(

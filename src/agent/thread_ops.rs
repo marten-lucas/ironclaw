@@ -2156,6 +2156,7 @@ impl Agent {
                     let safety = self.safety().clone();
                     let channels = self.channels.clone();
                     let job_ctx = job_ctx.clone();
+                    let runtime_policy = self.deps.runtime_policy.clone();
                     let tc = tc.clone();
                     let channel = message.channel.clone();
                     let metadata = message.metadata.clone();
@@ -2177,6 +2178,7 @@ impl Agent {
                         let result = execute_chat_tool_standalone(
                             &tools,
                             &safety,
+                            runtime_policy.as_ref(),
                             &tc.name,
                             &tc.arguments,
                             &job_ctx,

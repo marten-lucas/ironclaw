@@ -752,6 +752,37 @@ fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct ResponsesActionDef {
+    name: String,
+    description: String,
+    parameters_schema: serde_json::Value,
+    requires_approval: bool,
+}
+
+/// Convert caller-supplied `tools[]` into lightweight action definitions used
+/// by local unit tests. Caller schemas pass through unchanged:
+/// `parameters` becomes `parameters_schema`.
+#[cfg(test)]
+fn responses_tools_to_action_defs(tools: &[ResponsesTool]) -> Vec<ResponsesActionDef> {
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.name.clone()?;
+            Some(ResponsesActionDef {
+                name,
+                description: tool.description.clone().unwrap_or_default(),
+                parameters_schema: tool
+                    .parameters
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object"})),
+                requires_approval: false,
+            })
+        })
+        .collect()
+}
+
 /// Synthetic engine action names that the orchestrator emits as
 /// `ActionStarted`/`ActionFailed` events for internal bookkeeping
 /// (CodeAct script execution, etc.) but which are not real

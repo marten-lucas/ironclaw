@@ -8,27 +8,35 @@ import {
 } from "./workspace-presenters";
 
 const LABELS = {
-  "workspace.area.home": "Home",
-  "workspace.area.memory": "Memory",
+  "workspace.area.identity": "Identity",
+  "workspace.area.soul": "Soul",
+  "workspace.area.user": "User",
+  "workspace.area.agents": "Agents",
 };
 const t = (key) => LABELS[key] || key;
 
 test("workspace area labels are translated without changing unknown backend ids", () => {
-  assert.equal(areaDisplayName("workspace", t), "Home");
-  assert.equal(areaDisplayName("memory", t), "Memory");
+  assert.equal(areaDisplayName("identity", t), "Identity");
+  assert.equal(areaDisplayName("soul", t), "Soul");
+  assert.equal(areaDisplayName("user", t), "User");
+  assert.equal(areaDisplayName("agents", t), "Agents");
+  assert.equal(areaDisplayName("workspace", t), "User");
+  assert.equal(areaDisplayName("memory", t), "Soul");
+  assert.equal(areaDisplayName("skills", t), "Agents");
   assert.equal(areaDisplayName("future-area", t), "future-area");
   assert.equal(areaDisplayName("toString", t), "toString");
 });
 
 test("workspace root entries sort by their localized labels", () => {
   const entries = [
+    { name: "skills", path: "skills", is_dir: true },
     { name: "workspace", path: "workspace", is_dir: true },
     { name: "memory", path: "memory", is_dir: true },
   ];
 
   assert.deepEqual(
     sortEntries(entries, (entry) => areaDisplayName(entry.path, t)).map((entry) => entry.path),
-    ["workspace", "memory"],
+    ["skills", "memory", "workspace"],
   );
 });
 

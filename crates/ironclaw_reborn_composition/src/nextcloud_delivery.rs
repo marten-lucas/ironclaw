@@ -34,7 +34,7 @@ use crate::nextcloud_egress::{
     NextcloudEgressCredential, NextcloudEgressCredentialError, NextcloudEgressCredentialProvider,
     NextcloudProtocolHttpEgress,
 };
-use crate::product_auth_runtime_credentials::{
+use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
 };
 use ironclaw_secrets::SecretStore;

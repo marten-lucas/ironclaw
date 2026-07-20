@@ -9,17 +9,42 @@ const DEFAULT_WEBHOOK_PATH: &str = "/webhooks/nextcloud/talk";
 const DEFAULT_BOT_NAME: &str = "ironclaw";
 
 pub(crate) fn resolve_nextcloud_talk_config_for_serve(
-    _nextcloud_section: Option<&NextcloudTalkSection>,
+    nextcloud_section: Option<&NextcloudTalkSection>,
     tenant_id: &TenantId,
     default_agent_id: &AgentId,
     default_project_id: Option<&ProjectId>,
     default_user_id: &UserId,
     _config_path: &Path,
 ) -> anyhow::Result<Option<NextcloudTalkRouteConfig>> {
-    let extension_id = DEFAULT_EXTENSION_ID.to_string();
-    let webhook_path = DEFAULT_WEBHOOK_PATH.to_string();
+    if nextcloud_section
+        .and_then(|section| section.enabled)
+        .is_some_and(|enabled| !enabled)
+    {
+        return Ok(None);
+    }
 
-    let bot_name = DEFAULT_BOT_NAME.to_string();
+    let extension_id = nextcloud_section
+        .and_then(|section| section.extension_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_EXTENSION_ID)
+        .to_string();
+    let webhook_path = nextcloud_section
+        .and_then(|section| section.webhook_path.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_WEBHOOK_PATH)
+        .to_string();
+
+    let bot_name = nextcloud_section
+        .and_then(|section| section.bot_name.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_BOT_NAME)
+        .to_string();
+    let model_profiles = nextcloud_section
+        .map(|section| section.model_profiles.clone())
+        .unwrap_or_default();
     // Outbound host is resolved from extension setup credentials
     // (`nextcloud_talk_base_url`) at runtime.
     let nextcloud_host = None;
@@ -33,6 +58,7 @@ pub(crate) fn resolve_nextcloud_talk_config_for_serve(
         webhook_path,
         bot_name,
         nextcloud_host,
+        model_profiles,
     };
     Ok(Some(route_config))
 }
@@ -54,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ignores_configured_nextcloud_bot_name() {
+    fn resolve_uses_configured_nextcloud_bot_name() {
         let nextcloud = NextcloudTalkSection {
             bot_name: Some("test".to_string()),
             ..Default::default()
@@ -71,7 +97,7 @@ mod tests {
         .expect("route config")
         .expect("nextcloud config");
 
-        assert_eq!(config.bot_name, DEFAULT_BOT_NAME);
+        assert_eq!(config.bot_name, "test");
     }
 
     #[test]
@@ -93,5 +119,48 @@ mod tests {
         .expect("nextcloud config");
 
         assert_eq!(config.bot_name, DEFAULT_BOT_NAME);
+    }
+
+    #[test]
+    fn resolve_uses_configured_extension_and_webhook_path() {
+        let nextcloud = NextcloudTalkSection {
+            extension_id: Some("nextcloud-talk-custom".to_string()),
+            webhook_path: Some("/hooks/custom-nextcloud".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_nextcloud_talk_config_for_serve(
+            Some(&nextcloud),
+            &tenant_id(),
+            &agent_id(),
+            None,
+            &user_id(),
+            Path::new("/tmp/ironclaw.toml"),
+        )
+        .expect("route config")
+        .expect("nextcloud config");
+
+        assert_eq!(config.extension_id, "nextcloud-talk-custom");
+        assert_eq!(config.webhook_path, "/hooks/custom-nextcloud");
+    }
+
+    #[test]
+    fn resolve_returns_none_when_nextcloud_is_disabled() {
+        let nextcloud = NextcloudTalkSection {
+            enabled: Some(false),
+            ..Default::default()
+        };
+
+        let config = resolve_nextcloud_talk_config_for_serve(
+            Some(&nextcloud),
+            &tenant_id(),
+            &agent_id(),
+            None,
+            &user_id(),
+            Path::new("/tmp/ironclaw.toml"),
+        )
+        .expect("route config");
+
+        assert!(config.is_none(), "disabled nextcloud section must not mount route");
     }
 }

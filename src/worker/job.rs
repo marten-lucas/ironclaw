@@ -677,6 +677,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Redact sensitive parameter values before they touch any observability or audit path.
         let safe_params = redact_params(&effective_params, tool.sensitive_params());
         let risk = tool.risk_level_for(&effective_params);
+
+        if let Some(policy) = deps.runtime_policy.as_ref()
+            && !crate::tools::runtime_filter::is_visible_under(policy, tool.runtime_affordance())
+        {
+            return Err(crate::error::ToolError::AutonomousUnavailable {
+                name: tool_name.to_string(),
+                reason: format!(
+                "Tool '{}' is not allowed under the resolved runtime policy",
+                tool_name
+                ),
+            }
+            .into());
+        }
+
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,

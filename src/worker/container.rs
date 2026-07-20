@@ -574,6 +574,7 @@ impl LoopDelegate for ContainerDelegate {
             let result = execute_tool_simple(
                 &self.tools,
                 &self.safety,
+                None,
                 &tc.name,
                 tc.arguments.clone(),
                 &job_ctx,

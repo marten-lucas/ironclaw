@@ -2,6 +2,10 @@ import { apiFetch } from "../../../lib/api";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
+const SETTINGS_MODEL_PROFILES_BASE = "/api/webchat/v2/settings/model-profiles";
+const SETTINGS_AGENTS_BASE = "/api/webchat/v2/settings/agents";
+const SETTINGS_DELEGATIONS_BASE = "/api/webchat/v2/settings/delegations";
+const SETTINGS_AUDIT_BASE = "/api/webchat/v2/settings/audit";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 const TOOL_PREFIX = "tool.";
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
@@ -167,6 +171,36 @@ export async function updateToolPermission(name, state) {
   });
   return { success: true, tool: toolFromConfigEntry(data.entry), entry: data.entry };
 }
+export function fetchSettingsModelProfiles() {
+  return apiFetch(SETTINGS_MODEL_PROFILES_BASE);
+}
+
+export function upsertSettingsModelProfile(profileId, payload) {
+  return apiFetch(`${SETTINGS_MODEL_PROFILES_BASE}/${encodeURIComponent(profileId)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchSettingsAgents() {
+  return apiFetch(SETTINGS_AGENTS_BASE);
+}
+
+export function upsertSettingsAgent(agentId, payload) {
+  return apiFetch(`${SETTINGS_AGENTS_BASE}/${encodeURIComponent(agentId)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchSettingsDelegations() {
+  return apiFetch(SETTINGS_DELEGATIONS_BASE);
+}
+
+export function fetchSettingsAudit() {
+  return apiFetch(SETTINGS_AUDIT_BASE);
+}
+
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
 }
