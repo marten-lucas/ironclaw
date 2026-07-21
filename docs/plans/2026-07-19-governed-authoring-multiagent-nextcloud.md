@@ -460,3 +460,106 @@ Die spätere Umsetzung sollte in dieser Reihenfolge erfolgen:
 7. Audit und Revert.
 
 So bleibt das System erweiterbar, ohne die bestehende Reborn-Architektur zu destabilisieren.
+
+## 12. Umsetzungsstatus Phase 0-6 (Stand 2026-07-20)
+
+Dieser Abschnitt dokumentiert den tatsächlich umgesetzten Teil des Programms und die verbleibenden Schritte. Die Umsetzung erfolgt inkrementell, damit der Betrieb stabil bleibt und Contract-Tests die API-Oberflaeche absichern.
+
+### 12.1 Bereits umgesetzt in diesem Implementierungsschnitt
+
+- Neue Governed-Authoring-API-Routen in WebUI v2 Descriptoren und Router:
+  - `GET /api/webchat/v2/settings/identity`
+  - `POST /api/webchat/v2/settings/identity/{identity_id}`
+  - `GET /api/webchat/v2/settings/memory`
+  - `POST /api/webchat/v2/settings/memory/{memory_id}`
+  - `GET /api/webchat/v2/settings/tool-policies`
+  - `POST /api/webchat/v2/settings/tool-policies/{policy_id}`
+- Hartere Multiagent- und Audit-Flows ueber neue Mutations-Endpunkte:
+  - `POST /api/webchat/v2/settings/delegations/{task_id}`
+  - `POST /api/webchat/v2/settings/audit/{audit_id}`
+- Handler-Implementierung fuer alle neuen Endpunkte inkl. Validierung und fail-closed Keyspace-Grenzen.
+- Contract-Haertung:
+  - Descriptor-Contract-Tests um alle neuen Routen erweitert.
+  - Handler-Contract-Tests um neue GET/POST-Flows und Call-Erwartungen erweitert.
+
+### 12.2 Phase-Status
+
+- Phase 0 (Contract Freeze): in Arbeit
+  - API-Flaechen fuer Identity/Memory/ToolPolicy/Delegation/Audit sind jetzt explizit als Host-Route-Contracts modelliert.
+  - Contract-Validierung erfolgt: `webui_v2_descriptors_contract` (3/3) und `webui_v2_handlers_contract` (105/105) gruen.
+  - Verbleibend: Payload-Schema als eigenstaendige Domain-Types finalisieren (weg von reinem `serde_json::Value`).
+
+- Phase 1 (Authoring Domain modellieren): begonnen
+  - Identitaet, Memory und Tool Policies besitzen nun eigene API-Oberflaechen.
+  - Endpunkte fuer Identity, Memory und Tool Policies nutzen jetzt typsichere Request-Schemata statt generischem JSON.
+  - Persistenz-Scaffold ist vorhanden: dedizierte Domain-Records + Keyspace-Mapping (`IdentityDocument`, `MemoryItem`, `ToolPolicy`, `DelegationTask`, `AuditEntry`).
+  - Schreibpfade fuer Identity/Memory/ToolPolicy/Delegation/Audit serialisieren jetzt ueber Domain-Records und nutzen zentrales Key-Building (bei beibehaltener Legacy-Wire-Form ohne `id`-Payloadfeld).
+  - Agent-Roster (`settings/agents`) ist jetzt ebenfalls typisiert und ueber Domain-Record + zentrales Key-Building migriert.
+  - Lesepfade fuer Identity/Memory/ToolPolicy/Delegation/Audit normalisieren jetzt Keyspace-Eintraege ueber Domain-Records (Key->`id`-Hydration intern, Legacy-Wire-Form nach aussen unveraendert).
+  - Lesepfad fuer Agent-Roster normalisiert jetzt ebenfalls ueber Domain-Records mit unveraenderter Legacy-Wire-Form.
+  - Verbleibend: Persistenz von Handler-Keyspace-Reads/Writes schrittweise auf das neue Domain-Store-Scaffold umverdrahten.
+
+- Phase 2 (Authoring UI): offen
+  - Verbleibend: dedizierte UI-Seiten/Editoren fuer Identity, Memory und Tool Policies mit Versionierung und Diff-Ansicht.
+
+- Phase 3 (Epic C Multiagent Roster/Delegation): begonnen
+  - Delegations sind nun nicht mehr read-only, sondern schreibbar ueber dedizierten Endpoint.
+  - Delegation besitzt jetzt eine Statusmaschine mit kontrollierten Uebergaengen (`admit -> dispatch -> resolve|cancel`) inklusive Validierung.
+  - Delegation-Transitions laufen jetzt ueber eine dedizierte Runtime-Komponente mit typisierten Fehlercodes und Konsistenzpruefung (Actor/Profile-Mismatch fail-closed).
+  - Verbleibend: echte `DelegationTask`-Lifecycle-Engine (admit/dispatch/resolve), nicht nur settings-basierte Projektion.
+
+- Phase 4 (Epic D Policy Enforcement): begonnen
+  - Tool-Policy-Entitaeten sind als eigene governte API erreichbar.
+  - Zentraler Policy-Decision-Checkpoint greift jetzt vor Delegation-Aktionen und Tool-Permission-Mutationen.
+  - Decision-Checkpoint greift jetzt zusaetzlich vor Tool-Execution (`POST /threads/{thread_id}/messages`) und Channel-Egress-Pfaden (`POST /outbound/preferences`, `POST /extensions/{package_id}/setup/test-message`).
+  - Verbleibend: zentraler Decision-Point vor Delegation/Tool-Exec/Channel-Egress mit begruendeten Entscheiden (`allow/deny/escalate`).
+
+- Phase 5 (Channel-Integration): offen
+  - Verbleibend: Policy-gebundene Delegation/Egress-Checks in Nextcloud-Flows und kanaluebergreifende Enforcement-Integration.
+
+- Phase 6 (Audit/Revert): begonnen
+  - Audit ist jetzt auch mutierbar ueber dedizierten Endpoint.
+  - ToolPolicy/Identity/Memory-Vertikalschnitte umgesetzt: verpflichtende before/after Snapshots bei Upserts plus Revert-Endpoints fuer
+    - `POST /api/webchat/v2/settings/tool-policies/{policy_id}/revert`
+    - `POST /api/webchat/v2/settings/identity/{identity_id}/revert`
+    - `POST /api/webchat/v2/settings/memory/{memory_id}/revert`
+  - Neu: dedizierte Diff-Read-API `GET /api/webchat/v2/settings/audit/{audit_id}/diff` mit Restore-Eignung (`restore_validation`) umgesetzt.
+  - Neu: gemeinsame Restore-Haertung fuer Identity/Memory/ToolPolicy ueber konsistenten Snapshot-Loader (fail-closed bei ungueltigem/mismatch Audit-Target).
+  - Neu: UI-Audit-Tab zeigt Diff je Audit-Eintrag und bietet explizite Restore-Aktion mit Erfolgs-/Fehlerstatus.
+  - Verbleibend: E2E-Abdeckung fuer Diff/Restore-Flows und Visual-Pipeline-Checks gegen Endumgebungen.
+
+### 12.3 Naechste konkrete Umsetzungsschritte
+
+1. Domain-Typen fuer IdentityDocument, MemoryItem, ToolPolicy, DelegationTask, AuditEntry einfuehren. (erledigt)
+2. Handler von `serde_json::Value` auf typsichere Request-Schemata umstellen.
+3. DelegationTask von Keyspace-Projektion auf Runtime-Lifecycle mit Statusmaschine migrieren.
+4. Policy Decision Layer als gemeinsamen Checkpoint fuer Delegation, Tool-Execution und Channel-Egress verdrahten.
+5. Audit-Diff + Revert API implementieren und UI-seitig sichtbar machen. (Backend/UI umgesetzt; E2E-Haertung offen)
+
+### 12.5 Migrationsplan Domain-Persistenz (Scaffold -> Runtime)
+
+1. Keyspace-Kompatibilitaet halten:
+  - Bestehende Keys (`identity.*`, `memory.*`, `tool_policy.*`, `delegation.*`, `audit.*`) bleiben waehrend der Migration gueltig.
+  - Domain-Store-Funktionen bauen/parsen diese Keys zentral, damit Handler keine Prefix-Strings mehr duplizieren.
+2. Schreibpfade zuerst migrieren:
+  - `POST /settings/identity/{id}`, `POST /settings/memory/{id}`, `POST /settings/tool-policies/{id}` zuerst auf Domain-Records serialisieren.
+  - Danach `POST /settings/delegations/{id}` und `POST /settings/audit/{id}` vollstaendig ueber Domain-Records laufen lassen.
+  - Status: umgesetzt fuer die aktuellen WebUI-v2 Settings-Endpunkte, inkl. zentraler Key-Building-Nutzung.
+3. Lesepfade danach migrieren:
+  - List-Endpoints lesen aus Domain-Store und liefern weiterhin dasselbe HTTP-Schema zurueck.
+  - Status: umgesetzt fuer die aktuellen WebUI-v2 Settings-List-Endpunkte als Domain-Normalisierungsschritt.
+  - Agent-List-Endpunkt ist in diesem Schritt mitmigriert und typisiert.
+4. Safety-Net:
+  - Bei ungultigen Legacy-Payloads fail-closed (`invalid_value`) statt stiller Teilmigration.
+5. Abnahme:
+  - Contract-Tests muessen unveraendert gruen bleiben.
+  - Neue Unit-Tests sichern Keyspace-Mapping + Serde-Roundtrip der Domain-Records.
+
+### 12.4 Warning-Cleanup-Task (separat von Epic-A/C/D-Haertung)
+
+- Ziel: Build/Test-Output fuer Contract- und E2E-Pipelines auf relevante Signale reduzieren.
+- Scope (nicht-blockierend fuer aktuellen Stand):
+  - `ironclaw_threads`: ungenutzte Methode `is_thread_index_known` bereinigen oder bewusst markieren. (umgesetzt: entfernt)
+  - `ironclaw_product_workflow`: ungenutzte Variable `onboarding_state` umbenennen/verwenden. (umgesetzt: verwendet)
+  - `ironclaw_product_workflow`: ungenutzte Diagnosefunktionen aufraeumen oder unter Feature-Gates absichern. (umgesetzt: ungenutzte Helper entfernt)
+- Akzeptanzkriterium: Keine neuen `unused`/`dead_code`-Warnungen aus den genannten Crates in den Standard-Contract-Testlaeufen.

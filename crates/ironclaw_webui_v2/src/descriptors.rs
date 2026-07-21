@@ -74,11 +74,32 @@ pub const WEBUI_V2_ROUTE_LIST_SETTINGS_MODEL_PROFILES: &str =
     "webui.v2.settings.list_model_profiles";
 pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_MODEL_PROFILE: &str =
     "webui.v2.settings.upsert_model_profile";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_IDENTITY: &str = "webui.v2.settings.list_identity";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_IDENTITY: &str =
+    "webui.v2.settings.upsert_identity";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_IDENTITY: &str =
+    "webui.v2.settings.revert_identity";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_MEMORY: &str = "webui.v2.settings.list_memory";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_MEMORY: &str = "webui.v2.settings.upsert_memory";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_MEMORY: &str =
+    "webui.v2.settings.revert_memory";
+pub const WEBUI_V2_ROUTE_LIST_SETTINGS_TOOL_POLICIES: &str =
+    "webui.v2.settings.list_tool_policies";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_TOOL_POLICY: &str =
+    "webui.v2.settings.upsert_tool_policy";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_TOOL_POLICY: &str =
+    "webui.v2.settings.revert_tool_policy";
 pub const WEBUI_V2_ROUTE_LIST_SETTINGS_AGENTS: &str = "webui.v2.settings.list_agents";
 pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_AGENT: &str = "webui.v2.settings.upsert_agent";
 pub const WEBUI_V2_ROUTE_LIST_SETTINGS_DELEGATIONS: &str =
     "webui.v2.settings.list_delegations";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_DELEGATION: &str =
+    "webui.v2.settings.upsert_delegation";
 pub const WEBUI_V2_ROUTE_LIST_SETTINGS_AUDIT: &str = "webui.v2.settings.list_audit";
+pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_AUDIT_ENTRY: &str =
+    "webui.v2.settings.upsert_audit_entry";
+pub const WEBUI_V2_ROUTE_GET_SETTINGS_AUDIT_DIFF: &str =
+    "webui.v2.settings.get_audit_diff";
 pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
@@ -191,12 +212,34 @@ pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES: &str =
     "/api/webchat/v2/settings/model-profiles";
 pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL: &str =
     "/api/webchat/v2/settings/model-profiles/{profile_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_IDENTITY: &str = "/api/webchat/v2/settings/identity";
+pub const WEBUI_V2_PATTERN_SETTINGS_IDENTITY_DETAIL: &str =
+    "/api/webchat/v2/settings/identity/{identity_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_IDENTITY_REVERT: &str =
+    "/api/webchat/v2/settings/identity/{identity_id}/revert";
+pub const WEBUI_V2_PATTERN_SETTINGS_MEMORY: &str = "/api/webchat/v2/settings/memory";
+pub const WEBUI_V2_PATTERN_SETTINGS_MEMORY_DETAIL: &str =
+    "/api/webchat/v2/settings/memory/{memory_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_MEMORY_REVERT: &str =
+    "/api/webchat/v2/settings/memory/{memory_id}/revert";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICIES: &str =
+    "/api/webchat/v2/settings/tool-policies";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_DETAIL: &str =
+    "/api/webchat/v2/settings/tool-policies/{policy_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_REVERT: &str =
+    "/api/webchat/v2/settings/tool-policies/{policy_id}/revert";
 pub const WEBUI_V2_PATTERN_SETTINGS_AGENTS: &str = "/api/webchat/v2/settings/agents";
 pub const WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL: &str =
     "/api/webchat/v2/settings/agents/{agent_id}";
 pub const WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS: &str =
     "/api/webchat/v2/settings/delegations";
+pub const WEBUI_V2_PATTERN_SETTINGS_DELEGATION_DETAIL: &str =
+    "/api/webchat/v2/settings/delegations/{task_id}";
 pub const WEBUI_V2_PATTERN_SETTINGS_AUDIT: &str = "/api/webchat/v2/settings/audit";
+pub const WEBUI_V2_PATTERN_SETTINGS_AUDIT_DETAIL: &str =
+    "/api/webchat/v2/settings/audit/{audit_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_AUDIT_DIFF: &str =
+    "/api/webchat/v2/settings/audit/{audit_id}/diff";
 pub const WEBUI_V2_PATTERN_GET_LLM_CONFIG: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/providers";
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
@@ -289,10 +332,22 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         set_settings_tool_permission_descriptor(),
         list_settings_model_profiles_descriptor(),
         upsert_settings_model_profile_descriptor(),
+        list_settings_identity_descriptor(),
+        upsert_settings_identity_descriptor(),
+        revert_settings_identity_descriptor(),
+        list_settings_memory_descriptor(),
+        upsert_settings_memory_descriptor(),
+        revert_settings_memory_descriptor(),
+        list_settings_tool_policies_descriptor(),
+        upsert_settings_tool_policy_descriptor(),
+        revert_settings_tool_policy_descriptor(),
         list_settings_agents_descriptor(),
         upsert_settings_agent_descriptor(),
         list_settings_delegations_descriptor(),
+        upsert_settings_delegation_descriptor(),
         list_settings_audit_descriptor(),
+        upsert_settings_audit_entry_descriptor(),
+        get_settings_audit_diff_descriptor(),
         get_llm_config_descriptor(),
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
@@ -1394,6 +1449,132 @@ fn upsert_settings_model_profile_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn list_settings_identity_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_IDENTITY,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_IDENTITY,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_settings_identity_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_IDENTITY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_IDENTITY_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn revert_settings_identity_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_IDENTITY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_IDENTITY_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_settings_memory_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_MEMORY,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_MEMORY,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_settings_memory_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_MEMORY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_MEMORY_DETAIL,
+        mutation_policy(
+            body_limit_kib(32),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn revert_settings_memory_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_MEMORY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_MEMORY_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn list_settings_tool_policies_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_SETTINGS_TOOL_POLICIES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICIES,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_settings_tool_policy_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_TOOL_POLICY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_DETAIL,
+        mutation_policy(
+            body_limit_kib(32),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn revert_settings_tool_policy_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_TOOL_POLICY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn list_settings_agents_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_SETTINGS_AGENTS,
@@ -1436,11 +1617,53 @@ fn list_settings_delegations_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn upsert_settings_delegation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_DELEGATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_DELEGATION_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn list_settings_audit_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_SETTINGS_AUDIT,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_SETTINGS_AUDIT,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn upsert_settings_audit_entry_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_UPSERT_SETTINGS_AUDIT_ENTRY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_AUDIT_DETAIL,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_settings_audit_diff_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_SETTINGS_AUDIT_DIFF,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETTINGS_AUDIT_DIFF,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

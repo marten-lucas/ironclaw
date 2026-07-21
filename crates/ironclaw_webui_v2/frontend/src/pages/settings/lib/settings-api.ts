@@ -201,6 +201,34 @@ export function fetchSettingsAudit() {
   return apiFetch(SETTINGS_AUDIT_BASE);
 }
 
+export function fetchSettingsAuditDiff(auditId) {
+  return apiFetch(`${SETTINGS_AUDIT_BASE}/${encodeURIComponent(auditId)}/diff`);
+}
+
+export function revertSettingsIdentity(identityId, auditId) {
+  return apiFetch(`/api/webchat/v2/settings/identity/${encodeURIComponent(identityId)}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ audit_id: auditId }),
+  });
+}
+
+export function revertSettingsMemory(memoryId, auditId) {
+  return apiFetch(`/api/webchat/v2/settings/memory/${encodeURIComponent(memoryId)}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ audit_id: auditId }),
+  });
+}
+
+export function revertSettingsToolPolicy(policyId, auditId) {
+  return apiFetch(
+    `/api/webchat/v2/settings/tool-policies/${encodeURIComponent(policyId)}/revert`,
+    {
+      method: "POST",
+      body: JSON.stringify({ audit_id: auditId }),
+    }
+  );
+}
+
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
 }

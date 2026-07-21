@@ -41,9 +41,16 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_SEARCH_SKILLS, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
     WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL, WEBUI_V2_PATTERN_SETTINGS_AGENTS,
-    WEBUI_V2_PATTERN_SETTINGS_AUDIT, WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS,
+    WEBUI_V2_PATTERN_SETTINGS_AUDIT, WEBUI_V2_PATTERN_SETTINGS_AUDIT_DETAIL,
+    WEBUI_V2_PATTERN_SETTINGS_AUDIT_DIFF,
+    WEBUI_V2_PATTERN_SETTINGS_DELEGATION_DETAIL, WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS,
+    WEBUI_V2_PATTERN_SETTINGS_IDENTITY, WEBUI_V2_PATTERN_SETTINGS_IDENTITY_DETAIL,
+    WEBUI_V2_PATTERN_SETTINGS_IDENTITY_REVERT, WEBUI_V2_PATTERN_SETTINGS_MEMORY,
+    WEBUI_V2_PATTERN_SETTINGS_MEMORY_DETAIL, WEBUI_V2_PATTERN_SETTINGS_MEMORY_REVERT,
     WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL, WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES,
-    WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
+    WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICIES,
+    WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_DETAIL, WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_REVERT,
+    WEBUI_V2_PATTERN_SETTINGS_TOOLS,
     WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SETUP_TEST_CONNECTION,
     WEBUI_V2_PATTERN_SETUP_TEST_MESSAGE, WEBUI_V2_PATTERN_SKILL_DETAIL,
     WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
@@ -332,6 +339,42 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             post(handlers::upsert_settings_model_profile),
         )
         .route(
+            WEBUI_V2_PATTERN_SETTINGS_IDENTITY,
+            get(handlers::list_settings_identity),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_IDENTITY_DETAIL,
+            post(handlers::upsert_settings_identity),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_IDENTITY_REVERT,
+            post(handlers::revert_settings_identity),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_MEMORY,
+            get(handlers::list_settings_memory),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_MEMORY_DETAIL,
+            post(handlers::upsert_settings_memory),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_MEMORY_REVERT,
+            post(handlers::revert_settings_memory),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICIES,
+            get(handlers::list_settings_tool_policies),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_DETAIL,
+            post(handlers::upsert_settings_tool_policy),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_REVERT,
+            post(handlers::revert_settings_tool_policy),
+        )
+        .route(
             WEBUI_V2_PATTERN_SETTINGS_AGENTS,
             get(handlers::list_settings_agents),
         )
@@ -343,7 +386,19 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS,
             get(handlers::list_settings_delegations),
         )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_DELEGATION_DETAIL,
+            post(handlers::upsert_settings_delegation),
+        )
         .route(WEBUI_V2_PATTERN_SETTINGS_AUDIT, get(handlers::list_settings_audit))
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_AUDIT_DETAIL,
+            post(handlers::upsert_settings_audit_entry),
+        )
+        .route(
+            WEBUI_V2_PATTERN_SETTINGS_AUDIT_DIFF,
+            get(handlers::get_settings_audit_diff),
+        )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
             get(handlers::list_extension_registry),

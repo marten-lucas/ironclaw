@@ -344,7 +344,7 @@ fn extension_info(
         activation_error: None,
         version: Some(summary.version),
         runtime_status,
-        onboarding_state: onboarding.state,
+        onboarding_state,
         onboarding: onboarding.onboarding,
         install_scope,
     }

@@ -12,8 +12,9 @@
 //!
 //! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
 
+use std::collections::BTreeSet;
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::body::Body;
@@ -68,6 +69,17 @@ use serde::{Deserialize, Serialize};
 use ironclaw_host_api::{SecretHandle, UserId};
 
 use crate::error::WebUiV2HttpError;
+use crate::delegation_runtime::{
+    self, DelegationResolution as RuntimeDelegationResolution,
+    DelegationRuntimeAction, DelegationRuntimeErrorCode, DelegationTransitionInput,
+};
+use crate::governed_authoring::{
+    self, AgentRosterEntry, AuditEntry, DelegationTask,
+    GovernedAuthoringKind, IdentityDocument, IdentitySubjectType, MemoryItem, MemoryScope,
+    SETTINGS_AGENT_CONFIG_PREFIX, SETTINGS_AUDIT_CONFIG_PREFIX, SETTINGS_DELEGATION_CONFIG_PREFIX,
+    SETTINGS_IDENTITY_CONFIG_PREFIX, SETTINGS_MEMORY_CONFIG_PREFIX,
+    SETTINGS_TOOL_POLICY_CONFIG_PREFIX, ToolPolicy, ToolPolicyScope,
+};
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
@@ -79,15 +91,22 @@ const GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT: Duration = Duration::from_millis(250)
 const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_MODEL_PROFILE_CONFIG_PREFIX: &str = "model_profile.";
-const SETTINGS_AGENT_CONFIG_PREFIX: &str = "agent.roster.";
-const SETTINGS_DELEGATION_CONFIG_PREFIX: &str = "delegation.";
-const SETTINGS_AUDIT_CONFIG_PREFIX: &str = "audit.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 const SETTINGS_MODEL_PROFILE_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_MODEL_PROFILE_CONFIG_PREFIX.len();
+const SETTINGS_IDENTITY_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_IDENTITY_CONFIG_PREFIX.len();
+const SETTINGS_MEMORY_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_MEMORY_CONFIG_PREFIX.len();
+const SETTINGS_TOOL_POLICY_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_POLICY_CONFIG_PREFIX.len();
 const SETTINGS_AGENT_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_AGENT_CONFIG_PREFIX.len();
+const SETTINGS_DELEGATION_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_DELEGATION_CONFIG_PREFIX.len();
+const SETTINGS_AUDIT_ID_MAX_BYTES: usize =
+    OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_AUDIT_CONFIG_PREFIX.len();
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -378,6 +397,7 @@ pub async fn send_message(
     Path(thread_id): Path<String>,
     Json(mut body): Json<WebUiSendMessageRequest>,
 ) -> Result<Json<RebornSubmitTurnResponse>, WebUiV2HttpError> {
+    require_settings_policy_decision(&state, &caller, SettingsPolicyAction::ToolExecution).await?;
     body.thread_id = Some(thread_id);
     let response = state.services().submit_turn(caller, body).await?;
     Ok(Json(response))
@@ -1469,6 +1489,7 @@ pub async fn set_outbound_preferences(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornSetOutboundPreferencesRequest>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    require_settings_policy_decision(&state, &caller, SettingsPolicyAction::ChannelEgress).await?;
     let response = state
         .services()
         .set_outbound_preferences(caller, body)
@@ -1734,6 +1755,7 @@ pub async fn send_extension_test_message(
     Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
     Json(body): Json<WebUiTestExtensionConnectionRequest>,
 ) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    require_settings_policy_decision(&state, &caller, SettingsPolicyAction::ChannelEgress).await?;
     let package_ref = extension_package_ref_for_request(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
@@ -1835,6 +1857,31 @@ pub struct SettingsToolPermissionRequest {
     pub state: SettingsToolPermissionState,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SettingsPolicyAction {
+    ToolPermissionWrite,
+    ToolExecution,
+    ChannelEgress,
+    DelegationAdmit,
+    DelegationDispatch,
+    DelegationResolve,
+    DelegationCancel,
+}
+
+impl SettingsPolicyAction {
+    fn as_rule_key(self) -> &'static str {
+        match self {
+            Self::ToolPermissionWrite => "tool.permission.write",
+            Self::ToolExecution => "tool.execution",
+            Self::ChannelEgress => "channel.egress",
+            Self::DelegationAdmit => "delegation.admit",
+            Self::DelegationDispatch => "delegation.dispatch",
+            Self::DelegationResolve => "delegation.resolve",
+            Self::DelegationCancel => "delegation.cancel",
+        }
+    }
+}
+
 /// `POST /api/webchat/v2/settings/tools/{capability_id}`
 pub async fn set_settings_tool_permission(
     State(state): State<WebUiV2State>,
@@ -1844,6 +1891,12 @@ pub async fn set_settings_tool_permission(
     Json(body): Json<SettingsToolPermissionRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_tool_capability_id(&capability_id)?;
+    require_settings_policy_decision(
+        &state,
+        &caller,
+        SettingsPolicyAction::ToolPermissionWrite,
+    )
+    .await?;
     let key =
         validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
     let response = state
@@ -1865,11 +1918,212 @@ pub struct SettingsModelProfilePath {
     pub profile_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SettingsIdentityPath {
+    pub identity_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsMemoryPath {
+    pub memory_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsToolPolicyPath {
+    pub policy_id: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SettingsModelProfileUpsertRequest {
     pub model: String,
     #[serde(default)]
     pub temperature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsIdentitySubjectType {
+    System,
+    Agent,
+    User,
+    Channel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsIdentityUpsertRequest {
+    pub subject_type: SettingsIdentitySubjectType,
+    pub subject_id: String,
+    #[serde(default)]
+    pub tone: Option<String>,
+    #[serde(default)]
+    pub role_description: Option<String>,
+    #[serde(default)]
+    pub organization_context: Option<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsMemoryScope {
+    Identity,
+    Project,
+    Agent,
+    Global,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsMemoryUpsertRequest {
+    pub scope: SettingsMemoryScope,
+    #[serde(default)]
+    pub owner_id: Option<String>,
+    pub title: String,
+    pub content: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPolicyScope {
+    Global,
+    Channel,
+    Agent,
+    Profile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsToolPolicyUpsertRequest {
+    pub scope: SettingsToolPolicyScope,
+    #[serde(default)]
+    pub allow_rules: Vec<String>,
+    #[serde(default)]
+    pub deny_rules: Vec<String>,
+    #[serde(default)]
+    pub escalation_rules: Vec<String>,
+    #[serde(default)]
+    pub version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsToolPolicyRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsIdentityRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsMemoryRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsDelegationAction {
+    Admit,
+    Dispatch,
+    Resolve,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsDelegationResolution {
+    Completed,
+    Failed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsDelegationUpsertRequest {
+    pub source_agent_id: String,
+    pub target_agent_id: String,
+    #[serde(default = "default_requested_profile")]
+    pub requested_profile_id: String,
+    #[serde(default)]
+    pub resolved_model_profile_id: Option<String>,
+    pub action: SettingsDelegationAction,
+    #[serde(default)]
+    pub resolution: Option<SettingsDelegationResolution>,
+    #[serde(default)]
+    pub policy_context: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+fn default_requested_profile() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsAuditUpsertRequest {
+    pub actor_id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    #[serde(default)]
+    pub before_snapshot: Option<serde_json::Value>,
+    #[serde(default)]
+    pub after_snapshot: Option<serde_json::Value>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsAuditDiffEntry {
+    pub path: String,
+    pub change: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsAuditRestoreValidation {
+    pub supported: bool,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert_endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsAuditDiffResponse {
+    pub audit_id: String,
+    pub actor_id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_snapshot: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_snapshot: Option<serde_json::Value>,
+    pub diff: Vec<SettingsAuditDiffEntry>,
+    pub restore_validation: SettingsAuditRestoreValidation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevertEntityKind {
+    Identity,
+    Memory,
+    ToolPolicy,
 }
 
 /// `GET /api/webchat/v2/settings/model-profiles`
@@ -1922,9 +2176,421 @@ pub async fn upsert_settings_model_profile(
     .into())
 }
 
+/// `GET /api/webchat/v2/settings/identity`
+pub async fn list_settings_identity(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_IDENTITY_CONFIG_PREFIX));
+    for entry in &mut response.entries {
+        entry.value = normalize_governed_authoring_entry_value(
+            GovernedAuthoringKind::Identity,
+            &entry.key,
+            std::mem::take(&mut entry.value),
+        )?;
+    }
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/identity/{identity_id}`
+pub async fn upsert_settings_identity(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsIdentityPath { identity_id }): Path<SettingsIdentityPath>,
+    Json(body): Json<SettingsIdentityUpsertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("identity_id", &identity_id, SETTINGS_IDENTITY_ID_MAX_BYTES)?;
+    validate_settings_identity_payload(&body)?;
+    let key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Identity,
+        &identity_id,
+    ))?;
+    let before_snapshot = load_identity_snapshot(&state, &caller, &key).await?;
+    let document = IdentityDocument {
+        id: identity_id,
+        subject_type: to_identity_subject_type(body.subject_type),
+        subject_id: body.subject_id,
+        tone: body.tone,
+        role_description: body.role_description,
+        organization_context: body.organization_context,
+        constraints: body.constraints,
+        version: body.version,
+    };
+    let value = domain_record_value_without_id(document).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(caller.clone(), key, RebornOperatorConfigSetRequest { value })
+        .await?;
+    write_generated_identity_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
+    if response.entry.key.starts_with(SETTINGS_IDENTITY_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `POST /api/webchat/v2/settings/identity/{identity_id}/revert`
+pub async fn revert_settings_identity(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsIdentityPath { identity_id }): Path<SettingsIdentityPath>,
+    Json(body): Json<SettingsIdentityRevertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("identity_id", &identity_id, SETTINGS_IDENTITY_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+
+    let identity_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Identity,
+        &identity_id,
+    ))?;
+    let current_snapshot = load_identity_snapshot(&state, &caller, &identity_key).await?;
+
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::Identity,
+        &identity_id,
+        SETTINGS_IDENTITY_ID_MAX_BYTES,
+    )
+    .await?;
+
+    let document = identity_from_snapshot(&identity_id, snapshot)?;
+    let value = domain_record_value_without_id(document).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller.clone(),
+            identity_key,
+            RebornOperatorConfigSetRequest { value },
+        )
+        .await?;
+
+    write_generated_identity_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
+    if response.entry.key.starts_with(SETTINGS_IDENTITY_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `GET /api/webchat/v2/settings/memory`
+pub async fn list_settings_memory(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_MEMORY_CONFIG_PREFIX));
+    for entry in &mut response.entries {
+        entry.value = normalize_governed_authoring_entry_value(
+            GovernedAuthoringKind::Memory,
+            &entry.key,
+            std::mem::take(&mut entry.value),
+        )?;
+    }
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/memory/{memory_id}`
+pub async fn upsert_settings_memory(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsMemoryPath { memory_id }): Path<SettingsMemoryPath>,
+    Json(body): Json<SettingsMemoryUpsertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("memory_id", &memory_id, SETTINGS_MEMORY_ID_MAX_BYTES)?;
+    validate_settings_memory_payload(&body)?;
+    let key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Memory,
+        &memory_id,
+    ))?;
+    let before_snapshot = load_memory_snapshot(&state, &caller, &key).await?;
+    let item = MemoryItem {
+        id: memory_id,
+        scope: to_memory_scope(body.scope),
+        owner_id: body.owner_id,
+        title: body.title,
+        content: body.content,
+        tags: body.tags,
+        visibility: body.visibility,
+        version: body.version,
+    };
+    let value = domain_record_value_without_id(item).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(caller.clone(), key, RebornOperatorConfigSetRequest { value })
+        .await?;
+    write_generated_memory_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
+    if response.entry.key.starts_with(SETTINGS_MEMORY_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `POST /api/webchat/v2/settings/memory/{memory_id}/revert`
+pub async fn revert_settings_memory(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsMemoryPath { memory_id }): Path<SettingsMemoryPath>,
+    Json(body): Json<SettingsMemoryRevertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("memory_id", &memory_id, SETTINGS_MEMORY_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+
+    let memory_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Memory,
+        &memory_id,
+    ))?;
+    let current_snapshot = load_memory_snapshot(&state, &caller, &memory_key).await?;
+
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::Memory,
+        &memory_id,
+        SETTINGS_MEMORY_ID_MAX_BYTES,
+    )
+    .await?;
+
+    let item = memory_from_snapshot(&memory_id, snapshot)?;
+    let value = domain_record_value_without_id(item).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller.clone(),
+            memory_key,
+            RebornOperatorConfigSetRequest { value },
+        )
+        .await?;
+
+    write_generated_memory_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
+    if response.entry.key.starts_with(SETTINGS_MEMORY_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `GET /api/webchat/v2/settings/tool-policies`
+pub async fn list_settings_tool_policies(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
+    let mut response = state.services().list_operator_config(caller).await?;
+    response
+        .entries
+        .retain(|entry| entry.key.starts_with(SETTINGS_TOOL_POLICY_CONFIG_PREFIX));
+    for entry in &mut response.entries {
+        entry.value = normalize_governed_authoring_entry_value(
+            GovernedAuthoringKind::ToolPolicy,
+            &entry.key,
+            std::mem::take(&mut entry.value),
+        )?;
+    }
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/tool-policies/{policy_id}`
+pub async fn upsert_settings_tool_policy(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsToolPolicyPath { policy_id }): Path<SettingsToolPolicyPath>,
+    Json(body): Json<SettingsToolPolicyUpsertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("policy_id", &policy_id, SETTINGS_TOOL_POLICY_ID_MAX_BYTES)?;
+    validate_settings_tool_policy_payload(&body)?;
+    let key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::ToolPolicy,
+        &policy_id,
+    ))?;
+    let before_snapshot = load_tool_policy_snapshot(&state, &caller, &key).await?;
+    let policy = ToolPolicy {
+        id: policy_id,
+        scope: to_tool_policy_scope(body.scope),
+        allow_rules: body.allow_rules,
+        deny_rules: body.deny_rules,
+        escalation_rules: body.escalation_rules,
+        version: body.version,
+    };
+    let value = domain_record_value_without_id(policy).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(caller.clone(), key, RebornOperatorConfigSetRequest { value })
+        .await?;
+    write_generated_tool_policy_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
+    if response
+        .entry
+        .key
+        .starts_with(SETTINGS_TOOL_POLICY_CONFIG_PREFIX)
+    {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `POST /api/webchat/v2/settings/tool-policies/{policy_id}/revert`
+pub async fn revert_settings_tool_policy(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsToolPolicyPath { policy_id }): Path<SettingsToolPolicyPath>,
+    Json(body): Json<SettingsToolPolicyRevertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("policy_id", &policy_id, SETTINGS_TOOL_POLICY_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+
+    let tool_policy_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::ToolPolicy,
+        &policy_id,
+    ))?;
+    let current_snapshot = load_tool_policy_snapshot(&state, &caller, &tool_policy_key).await?;
+
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::ToolPolicy,
+        &policy_id,
+        SETTINGS_TOOL_POLICY_ID_MAX_BYTES,
+    )
+    .await?;
+
+    let policy = tool_policy_from_snapshot(&policy_id, snapshot)?;
+    let value = domain_record_value_without_id(policy).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller.clone(),
+            tool_policy_key,
+            RebornOperatorConfigSetRequest { value },
+        )
+        .await?;
+
+    write_generated_tool_policy_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
+    if response
+        .entry
+        .key
+        .starts_with(SETTINGS_TOOL_POLICY_CONFIG_PREFIX)
+    {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SettingsAgentPath {
     pub agent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsDelegationPath {
+    pub task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsAuditPath {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsAgentUpsertRequest {
+    pub display_name: String,
+    pub role: String,
+    pub default_profile_id: String,
+    pub policy_binding_id: String,
+    pub status: String,
 }
 
 /// `GET /api/webchat/v2/settings/agents`
@@ -1937,6 +2603,13 @@ pub async fn list_settings_agents(
     response
         .entries
         .retain(|entry| entry.key.starts_with(SETTINGS_AGENT_CONFIG_PREFIX));
+    for entry in &mut response.entries {
+        entry.value = normalize_governed_authoring_entry_value(
+            GovernedAuthoringKind::Agent,
+            &entry.key,
+            std::mem::take(&mut entry.value),
+        )?;
+    }
     Ok(Json(response))
 }
 
@@ -1946,13 +2619,26 @@ pub async fn upsert_settings_agent(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
     Path(SettingsAgentPath { agent_id }): Path<SettingsAgentPath>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<SettingsAgentUpsertRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_config_entity_id("agent_id", &agent_id, SETTINGS_AGENT_ID_MAX_BYTES)?;
-    let key = validate_operator_config_key(format!("{SETTINGS_AGENT_CONFIG_PREFIX}{agent_id}"))?;
+    validate_settings_agent_payload(&body)?;
+    let key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Agent,
+        &agent_id,
+    ))?;
+    let entry = AgentRosterEntry {
+        id: agent_id,
+        display_name: body.display_name,
+        role: body.role,
+        default_profile_id: body.default_profile_id,
+        policy_binding_id: body.policy_binding_id,
+        status: body.status,
+    };
+    let value = domain_record_value_without_id(entry).map_err(RebornServicesError::internal_from)?;
     let response = state
         .services()
-        .set_operator_config_key(caller, key, RebornOperatorConfigSetRequest { value: body })
+        .set_operator_config_key(caller, key, RebornOperatorConfigSetRequest { value })
         .await?;
     if response.entry.key.starts_with(SETTINGS_AGENT_CONFIG_PREFIX) {
         return Ok(Json(response));
@@ -1974,7 +2660,70 @@ pub async fn list_settings_delegations(
     response
         .entries
         .retain(|entry| entry.key.starts_with(SETTINGS_DELEGATION_CONFIG_PREFIX));
+    for entry in &mut response.entries {
+        entry.value = normalize_governed_authoring_entry_value(
+            GovernedAuthoringKind::Delegation,
+            &entry.key,
+            std::mem::take(&mut entry.value),
+        )?;
+    }
     Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/delegations/{task_id}`
+pub async fn upsert_settings_delegation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsDelegationPath { task_id }): Path<SettingsDelegationPath>,
+    Json(body): Json<SettingsDelegationUpsertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("task_id", &task_id, SETTINGS_DELEGATION_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id(
+        "source_agent_id",
+        &body.source_agent_id,
+        SETTINGS_AGENT_ID_MAX_BYTES,
+    )?;
+    validate_settings_config_entity_id(
+        "target_agent_id",
+        &body.target_agent_id,
+        SETTINGS_AGENT_ID_MAX_BYTES,
+    )?;
+    validate_settings_config_entity_id(
+        "requested_profile_id",
+        &body.requested_profile_id,
+        SETTINGS_MODEL_PROFILE_ID_MAX_BYTES,
+    )?;
+    require_settings_policy_decision(
+        &state,
+        &caller,
+        delegation_policy_action(body.action),
+    )
+    .await?;
+
+    let key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Delegation,
+        &task_id,
+    ))?;
+    let current = load_operator_config_value(&state, &caller, &key).await?;
+    let next = transition_delegation_task(&task_id, current, body)?;
+    let value = domain_record_value_without_id(next).map_err(RebornServicesError::internal_from)?;
+    let response = state
+        .services()
+        .set_operator_config_key(caller, key, RebornOperatorConfigSetRequest { value })
+        .await?;
+    if response
+        .entry
+        .key
+        .starts_with(SETTINGS_DELEGATION_CONFIG_PREFIX)
+    {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
 }
 
 /// `GET /api/webchat/v2/settings/audit`
@@ -1987,7 +2736,856 @@ pub async fn list_settings_audit(
     response
         .entries
         .retain(|entry| entry.key.starts_with(SETTINGS_AUDIT_CONFIG_PREFIX));
+    for entry in &mut response.entries {
+        entry.value = normalize_governed_authoring_entry_value(
+            GovernedAuthoringKind::Audit,
+            &entry.key,
+            std::mem::take(&mut entry.value),
+        )?;
+    }
     Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/settings/audit/{audit_id}/diff`
+pub async fn get_settings_audit_diff(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsAuditPath { audit_id }): Path<SettingsAuditPath>,
+) -> Result<Json<SettingsAuditDiffResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("audit_id", &audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+    let audit_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Audit,
+        &audit_id,
+    ))?;
+    let audit_value = load_operator_config_value(&state, &caller, &audit_key)
+        .await?
+        .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
+    let entry: AuditEntry =
+        domain_record_from_key_value(GovernedAuthoringKind::Audit, &audit_key, audit_value)?;
+
+    let before_snapshot = entry.before_snapshot.clone();
+    let after_snapshot = entry.after_snapshot.clone();
+    let diff = compute_audit_diff(before_snapshot.as_ref(), after_snapshot.as_ref());
+    let restore_validation = restore_validation_for_audit_entry(&entry);
+
+    Ok(Json(SettingsAuditDiffResponse {
+        audit_id,
+        actor_id: entry.actor_id,
+        entity_type: entry.entity_type,
+        entity_id: entry.entity_id,
+        action: entry.action,
+        summary: entry.summary,
+        created_at: entry.created_at,
+        before_snapshot,
+        after_snapshot,
+        diff,
+        restore_validation,
+    }))
+}
+
+/// `POST /api/webchat/v2/settings/audit/{audit_id}`
+pub async fn upsert_settings_audit_entry(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsAuditPath { audit_id }): Path<SettingsAuditPath>,
+    Json(body): Json<SettingsAuditUpsertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("audit_id", &audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+    validate_settings_audit_payload(&body)?;
+    let key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Audit,
+        &audit_id,
+    ))?;
+    let entry = AuditEntry {
+        id: audit_id,
+        actor_id: body.actor_id,
+        entity_type: body.entity_type,
+        entity_id: body.entity_id,
+        action: body.action,
+        before_snapshot: body.before_snapshot,
+        after_snapshot: body.after_snapshot,
+        summary: body.summary,
+        created_at: body.created_at,
+    };
+    let value = domain_record_value_without_id(entry).map_err(RebornServicesError::internal_from)?;
+    let response = state
+        .services()
+        .set_operator_config_key(caller, key, RebornOperatorConfigSetRequest { value })
+        .await?;
+    if response.entry.key.starts_with(SETTINGS_AUDIT_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+fn bad_request_with(field: &'static str, code: WebUiInboundValidationCode) -> WebUiV2HttpError {
+    RebornServicesError::from(WebUiInboundValidationError::new(field, code)).into()
+}
+
+fn validate_settings_identity_payload(
+    body: &SettingsIdentityUpsertRequest,
+) -> Result<(), WebUiV2HttpError> {
+    if body.subject_id.trim().is_empty() {
+        return Err(bad_request_with("subject_id", WebUiInboundValidationCode::Blank));
+    }
+    Ok(())
+}
+
+fn validate_settings_memory_payload(body: &SettingsMemoryUpsertRequest) -> Result<(), WebUiV2HttpError> {
+    if body.title.trim().is_empty() {
+        return Err(bad_request_with("title", WebUiInboundValidationCode::Blank));
+    }
+    if body.content.trim().is_empty() {
+        return Err(bad_request_with("content", WebUiInboundValidationCode::Blank));
+    }
+    Ok(())
+}
+
+fn validate_settings_tool_policy_payload(
+    body: &SettingsToolPolicyUpsertRequest,
+) -> Result<(), WebUiV2HttpError> {
+    if body.allow_rules.is_empty() && body.deny_rules.is_empty() && body.escalation_rules.is_empty() {
+        return Err(bad_request_with("allow_rules", WebUiInboundValidationCode::Blank));
+    }
+    Ok(())
+}
+
+fn validate_settings_audit_payload(body: &SettingsAuditUpsertRequest) -> Result<(), WebUiV2HttpError> {
+    if body.actor_id.trim().is_empty() {
+        return Err(bad_request_with("actor_id", WebUiInboundValidationCode::Blank));
+    }
+    if body.entity_type.trim().is_empty() {
+        return Err(bad_request_with("entity_type", WebUiInboundValidationCode::Blank));
+    }
+    if body.action.trim().is_empty() {
+        return Err(bad_request_with("action", WebUiInboundValidationCode::Blank));
+    }
+    Ok(())
+}
+
+fn validate_tool_policy_revert_target(
+    entry: &AuditEntry,
+    policy_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "tool_policy" || entry.entity_type == "policy";
+    let valid_entity_id = entry.entity_id == policy_id
+        || entry.entity_id == format!("tool_policy.{policy_id}")
+        || entry.entity_id == format!("policy/{policy_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+fn validate_identity_revert_target(
+    entry: &AuditEntry,
+    identity_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "identity";
+    let valid_entity_id = entry.entity_id == identity_id
+        || entry.entity_id == format!("identity.{identity_id}")
+        || entry.entity_id == format!("identity/{identity_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+fn validate_memory_revert_target(
+    entry: &AuditEntry,
+    memory_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "memory";
+    let valid_entity_id = entry.entity_id == memory_id
+        || entry.entity_id == format!("memory.{memory_id}")
+        || entry.entity_id == format!("memory/{memory_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+async fn load_revert_before_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    audit_id: &str,
+    entity_kind: RevertEntityKind,
+    entity_id: &str,
+    _max_entity_id_bytes: usize,
+) -> Result<serde_json::Value, WebUiV2HttpError> {
+    let audit_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Audit,
+        audit_id,
+    ))?;
+    let audit_value = load_operator_config_value(state, caller, &audit_key)
+        .await?
+        .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
+    let audit_entry: AuditEntry =
+        domain_record_from_key_value(GovernedAuthoringKind::Audit, &audit_key, audit_value)?;
+
+    match entity_kind {
+        RevertEntityKind::Identity => validate_identity_revert_target(&audit_entry, entity_id)?,
+        RevertEntityKind::Memory => validate_memory_revert_target(&audit_entry, entity_id)?,
+        RevertEntityKind::ToolPolicy => validate_tool_policy_revert_target(&audit_entry, entity_id)?,
+    }
+
+    audit_entry
+        .before_snapshot
+        .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+fn compute_audit_diff(
+    before_snapshot: Option<&serde_json::Value>,
+    after_snapshot: Option<&serde_json::Value>,
+) -> Vec<SettingsAuditDiffEntry> {
+    let mut entries = Vec::new();
+    collect_audit_diff("$", before_snapshot, after_snapshot, &mut entries);
+    entries
+}
+
+fn collect_audit_diff(
+    path: &str,
+    before: Option<&serde_json::Value>,
+    after: Option<&serde_json::Value>,
+    output: &mut Vec<SettingsAuditDiffEntry>,
+) {
+    if before == after {
+        return;
+    }
+
+    match (before, after) {
+        (Some(serde_json::Value::Object(before_map)), Some(serde_json::Value::Object(after_map))) => {
+            let mut keys = BTreeSet::new();
+            keys.extend(before_map.keys().cloned());
+            keys.extend(after_map.keys().cloned());
+            for key in keys {
+                let next_path = format!("{path}.{key}");
+                collect_audit_diff(
+                    &next_path,
+                    before_map.get(&key),
+                    after_map.get(&key),
+                    output,
+                );
+            }
+        }
+        (Some(serde_json::Value::Array(before_items)), Some(serde_json::Value::Array(after_items))) => {
+            if before_items != after_items {
+                output.push(SettingsAuditDiffEntry {
+                    path: path.to_string(),
+                    change: "modified".to_string(),
+                    before: Some(serde_json::Value::Array(before_items.clone())),
+                    after: Some(serde_json::Value::Array(after_items.clone())),
+                });
+            }
+        }
+        (None, Some(after_value)) => {
+            output.push(SettingsAuditDiffEntry {
+                path: path.to_string(),
+                change: "added".to_string(),
+                before: None,
+                after: Some(after_value.clone()),
+            });
+        }
+        (Some(before_value), None) => {
+            output.push(SettingsAuditDiffEntry {
+                path: path.to_string(),
+                change: "removed".to_string(),
+                before: Some(before_value.clone()),
+                after: None,
+            });
+        }
+        (Some(before_value), Some(after_value)) => {
+            output.push(SettingsAuditDiffEntry {
+                path: path.to_string(),
+                change: "modified".to_string(),
+                before: Some(before_value.clone()),
+                after: Some(after_value.clone()),
+            });
+        }
+        (None, None) => {}
+    }
+}
+
+fn restore_validation_for_audit_entry(entry: &AuditEntry) -> SettingsAuditRestoreValidation {
+    let Some((entity_kind, canonical_entity_id)) = parse_restore_target(entry) else {
+        return SettingsAuditRestoreValidation {
+            supported: false,
+            status: "ineligible".to_string(),
+            reason: Some("unsupported_entity".to_string()),
+            revert_endpoint: None,
+        };
+    };
+
+    if entry.before_snapshot.is_none() {
+        return SettingsAuditRestoreValidation {
+            supported: false,
+            status: "ineligible".to_string(),
+            reason: Some("missing_before_snapshot".to_string()),
+            revert_endpoint: None,
+        };
+    }
+
+    let revert_endpoint = match entity_kind {
+        RevertEntityKind::Identity => {
+            format!("/api/webchat/v2/settings/identity/{canonical_entity_id}/revert")
+        }
+        RevertEntityKind::Memory => {
+            format!("/api/webchat/v2/settings/memory/{canonical_entity_id}/revert")
+        }
+        RevertEntityKind::ToolPolicy => {
+            format!("/api/webchat/v2/settings/tool-policies/{canonical_entity_id}/revert")
+        }
+    };
+
+    SettingsAuditRestoreValidation {
+        supported: true,
+        status: "eligible".to_string(),
+        reason: None,
+        revert_endpoint: Some(revert_endpoint),
+    }
+}
+
+fn parse_restore_target(entry: &AuditEntry) -> Option<(RevertEntityKind, String)> {
+    match entry.entity_type.as_str() {
+        "identity" => extract_canonical_entity_id(&entry.entity_id, "identity")
+            .map(|id| (RevertEntityKind::Identity, id)),
+        "memory" => {
+            extract_canonical_entity_id(&entry.entity_id, "memory")
+                .map(|id| (RevertEntityKind::Memory, id))
+        }
+        "tool_policy" | "policy" => extract_tool_policy_entity_id(&entry.entity_id)
+            .map(|id| (RevertEntityKind::ToolPolicy, id)),
+        _ => None,
+    }
+}
+
+fn extract_canonical_entity_id(entity_id: &str, prefix: &str) -> Option<String> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    if let Some(stripped) = entity_id.strip_prefix(&format!("{prefix}.")) {
+        return (!stripped.is_empty()).then(|| stripped.to_string());
+    }
+    if let Some(stripped) = entity_id.strip_prefix(&format!("{prefix}/")) {
+        return (!stripped.is_empty()).then(|| stripped.to_string());
+    }
+    Some(entity_id.to_string())
+}
+
+fn extract_tool_policy_entity_id(entity_id: &str) -> Option<String> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    for prefix in ["tool_policy.", "tool_policy/", "policy.", "policy/"] {
+        if let Some(stripped) = entity_id.strip_prefix(prefix) {
+            return (!stripped.is_empty()).then(|| stripped.to_string());
+        }
+    }
+    Some(entity_id.to_string())
+}
+
+fn identity_from_snapshot(
+    identity_id: &str,
+    snapshot: serde_json::Value,
+) -> Result<IdentityDocument, WebUiV2HttpError> {
+    match snapshot {
+        serde_json::Value::Object(mut map) => {
+            map.insert(
+                "id".to_string(),
+                serde_json::Value::String(identity_id.to_string()),
+            );
+            serde_json::from_value(serde_json::Value::Object(map))
+                .map_err(|_| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+        }
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
+}
+
+fn memory_from_snapshot(
+    memory_id: &str,
+    snapshot: serde_json::Value,
+) -> Result<MemoryItem, WebUiV2HttpError> {
+    match snapshot {
+        serde_json::Value::Object(mut map) => {
+            map.insert(
+                "id".to_string(),
+                serde_json::Value::String(memory_id.to_string()),
+            );
+            serde_json::from_value(serde_json::Value::Object(map))
+                .map_err(|_| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+        }
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
+}
+
+fn tool_policy_from_snapshot(
+    policy_id: &str,
+    snapshot: serde_json::Value,
+) -> Result<ToolPolicy, WebUiV2HttpError> {
+    match snapshot {
+        serde_json::Value::Object(mut map) => {
+            map.insert(
+                "id".to_string(),
+                serde_json::Value::String(policy_id.to_string()),
+            );
+            serde_json::from_value(serde_json::Value::Object(map))
+                .map_err(|_| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+        }
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
+}
+
+fn generated_audit_id(prefix: &str, entity_id: &str) -> String {
+    let now_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let timestamp = now_millis.to_string();
+    let reserved = prefix.len() + 1 + 1 + timestamp.len();
+    let max_entity_len = SETTINGS_AUDIT_ID_MAX_BYTES.saturating_sub(reserved);
+    let entity_prefix = if entity_id.len() > max_entity_len {
+        &entity_id[..max_entity_len]
+    } else {
+        entity_id
+    };
+    format!("{prefix}.{entity_prefix}.{timestamp}")
+}
+
+async fn load_tool_policy_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    let value = load_operator_config_value(state, caller, key).await?;
+    let Some(snapshot) = value else {
+        return Ok(None);
+    };
+
+    let record: ToolPolicy =
+        domain_record_from_key_value(GovernedAuthoringKind::ToolPolicy, key, snapshot)?;
+    let normalized =
+        domain_record_value_without_id(record).map_err(RebornServicesError::internal_from)?;
+    Ok(Some(normalized))
+}
+
+async fn load_identity_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    let value = load_operator_config_value(state, caller, key).await?;
+    let Some(snapshot) = value else {
+        return Ok(None);
+    };
+
+    let record: IdentityDocument =
+        domain_record_from_key_value(GovernedAuthoringKind::Identity, key, snapshot)?;
+    let normalized =
+        domain_record_value_without_id(record).map_err(RebornServicesError::internal_from)?;
+    Ok(Some(normalized))
+}
+
+async fn load_memory_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    let value = load_operator_config_value(state, caller, key).await?;
+    let Some(snapshot) = value else {
+        return Ok(None);
+    };
+
+    let record: MemoryItem =
+        domain_record_from_key_value(GovernedAuthoringKind::Memory, key, snapshot)?;
+    let normalized =
+        domain_record_value_without_id(record).map_err(RebornServicesError::internal_from)?;
+    Ok(Some(normalized))
+}
+
+async fn write_generated_tool_policy_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let policy_id = governed_authoring::parse_config_key(GovernedAuthoringKind::ToolPolicy, key)
+        .ok_or_else(|| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))?;
+    write_generated_entity_audit(
+        state,
+        caller,
+        "tp",
+        "tool_policy",
+        policy_id,
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
+async fn write_generated_identity_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let identity_id = governed_authoring::parse_config_key(GovernedAuthoringKind::Identity, key)
+        .ok_or_else(|| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))?;
+    write_generated_entity_audit(
+        state,
+        caller,
+        "id",
+        "identity",
+        identity_id,
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
+async fn write_generated_memory_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let memory_id = governed_authoring::parse_config_key(GovernedAuthoringKind::Memory, key)
+        .ok_or_else(|| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))?;
+    write_generated_entity_audit(
+        state,
+        caller,
+        "mem",
+        "memory",
+        memory_id,
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
+async fn write_generated_entity_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    id_prefix: &str,
+    entity_type: &str,
+    entity_id: String,
+    action: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+) -> Result<(), WebUiV2HttpError> {
+    let actor_id = caller.user_id.to_string();
+    let entry = AuditEntry {
+        id: generated_audit_id(id_prefix, &entity_id),
+        actor_id,
+        entity_type: entity_type.to_string(),
+        entity_id,
+        action: action.to_string(),
+        before_snapshot,
+        after_snapshot: Some(normalized_after_snapshot),
+        summary: None,
+        created_at: None,
+    };
+    let audit_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Audit,
+        &entry.id,
+    ))?;
+    let value = domain_record_value_without_id(entry).map_err(RebornServicesError::internal_from)?;
+    state
+        .services()
+        .set_operator_config_key(
+            caller.clone(),
+            audit_key,
+            RebornOperatorConfigSetRequest { value },
+        )
+        .await?;
+    Ok(())
+}
+
+fn validate_settings_agent_payload(body: &SettingsAgentUpsertRequest) -> Result<(), WebUiV2HttpError> {
+    if body.display_name.trim().is_empty() {
+        return Err(bad_request_with("display_name", WebUiInboundValidationCode::Blank));
+    }
+    if body.role.trim().is_empty() {
+        return Err(bad_request_with("role", WebUiInboundValidationCode::Blank));
+    }
+    if body.default_profile_id.trim().is_empty() {
+        return Err(bad_request_with("default_profile_id", WebUiInboundValidationCode::Blank));
+    }
+    if body.policy_binding_id.trim().is_empty() {
+        return Err(bad_request_with("policy_binding_id", WebUiInboundValidationCode::Blank));
+    }
+    if body.status.trim().is_empty() {
+        return Err(bad_request_with("status", WebUiInboundValidationCode::Blank));
+    }
+    Ok(())
+}
+
+fn delegation_policy_action(action: SettingsDelegationAction) -> SettingsPolicyAction {
+    match action {
+        SettingsDelegationAction::Admit => SettingsPolicyAction::DelegationAdmit,
+        SettingsDelegationAction::Dispatch => SettingsPolicyAction::DelegationDispatch,
+        SettingsDelegationAction::Resolve => SettingsPolicyAction::DelegationResolve,
+        SettingsDelegationAction::Cancel => SettingsPolicyAction::DelegationCancel,
+    }
+}
+
+fn to_identity_subject_type(subject_type: SettingsIdentitySubjectType) -> IdentitySubjectType {
+    match subject_type {
+        SettingsIdentitySubjectType::System => IdentitySubjectType::System,
+        SettingsIdentitySubjectType::Agent => IdentitySubjectType::Agent,
+        SettingsIdentitySubjectType::User => IdentitySubjectType::User,
+        SettingsIdentitySubjectType::Channel => IdentitySubjectType::Channel,
+    }
+}
+
+fn to_memory_scope(scope: SettingsMemoryScope) -> MemoryScope {
+    match scope {
+        SettingsMemoryScope::Identity => MemoryScope::Identity,
+        SettingsMemoryScope::Project => MemoryScope::Project,
+        SettingsMemoryScope::Agent => MemoryScope::Agent,
+        SettingsMemoryScope::Global => MemoryScope::Global,
+    }
+}
+
+fn to_tool_policy_scope(scope: SettingsToolPolicyScope) -> ToolPolicyScope {
+    match scope {
+        SettingsToolPolicyScope::Global => ToolPolicyScope::Global,
+        SettingsToolPolicyScope::Channel => ToolPolicyScope::Channel,
+        SettingsToolPolicyScope::Agent => ToolPolicyScope::Agent,
+        SettingsToolPolicyScope::Profile => ToolPolicyScope::Profile,
+    }
+}
+
+fn domain_record_value_without_id<T>(record: T) -> Result<serde_json::Value, serde_json::Error>
+where
+    T: Serialize,
+{
+    let mut value = serde_json::to_value(record)?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.remove("id");
+    }
+    Ok(value)
+}
+
+fn domain_record_from_key_value<T>(
+    kind: GovernedAuthoringKind,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<T, WebUiV2HttpError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let id = governed_authoring::parse_config_key(kind, key)
+        .ok_or_else(|| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))?;
+
+    match value {
+        serde_json::Value::Object(mut map) => {
+            map.insert("id".to_string(), serde_json::Value::String(id));
+            serde_json::from_value::<T>(serde_json::Value::Object(map))
+                .map_err(|_| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))
+        }
+        _ => Err(bad_request_with("key", WebUiInboundValidationCode::InvalidValue)),
+    }
+}
+
+fn normalize_governed_authoring_entry_value(
+    kind: GovernedAuthoringKind,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, WebUiV2HttpError> {
+    match kind {
+        GovernedAuthoringKind::Identity => {
+            let record: IdentityDocument = domain_record_from_key_value(kind, key, value)?;
+            domain_record_value_without_id(record)
+                .map_err(RebornServicesError::internal_from)
+                .map_err(Into::into)
+        }
+        GovernedAuthoringKind::Memory => {
+            let record: MemoryItem = domain_record_from_key_value(kind, key, value)?;
+            domain_record_value_without_id(record)
+                .map_err(RebornServicesError::internal_from)
+                .map_err(Into::into)
+        }
+        GovernedAuthoringKind::ToolPolicy => {
+            let record: ToolPolicy = domain_record_from_key_value(kind, key, value)?;
+            domain_record_value_without_id(record)
+                .map_err(RebornServicesError::internal_from)
+                .map_err(Into::into)
+        }
+        GovernedAuthoringKind::Agent => {
+            let record: AgentRosterEntry = domain_record_from_key_value(kind, key, value)?;
+            domain_record_value_without_id(record)
+                .map_err(RebornServicesError::internal_from)
+                .map_err(Into::into)
+        }
+        GovernedAuthoringKind::Delegation => {
+            let record: DelegationTask = domain_record_from_key_value(kind, key, value)?;
+            domain_record_value_without_id(record)
+                .map_err(RebornServicesError::internal_from)
+                .map_err(Into::into)
+        }
+        GovernedAuthoringKind::Audit => {
+            let record: AuditEntry = domain_record_from_key_value(kind, key, value)?;
+            domain_record_value_without_id(record)
+                .map_err(RebornServicesError::internal_from)
+                .map_err(Into::into)
+        }
+    }
+}
+
+async fn load_operator_config_value(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    let response = state.services().list_operator_config(caller.clone()).await?;
+    Ok(response
+        .entries
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| entry.value))
+}
+
+fn transition_delegation_task(
+    task_id: &str,
+    current: Option<serde_json::Value>,
+    request: SettingsDelegationUpsertRequest,
+) -> Result<DelegationTask, WebUiV2HttpError> {
+    let existing = match current {
+        Some(value) => Some(domain_record_from_key_value::<DelegationTask>(
+            GovernedAuthoringKind::Delegation,
+            &governed_authoring::config_key(GovernedAuthoringKind::Delegation, task_id),
+            value,
+        )?),
+        None => None,
+    };
+
+    let input = DelegationTransitionInput {
+        task_id: task_id.to_string(),
+        source_agent_id: request.source_agent_id,
+        target_agent_id: request.target_agent_id,
+        requested_profile_id: request.requested_profile_id,
+        resolved_model_profile_id: request.resolved_model_profile_id,
+        policy_context: request.policy_context,
+        prompt: request.prompt,
+        action: to_runtime_delegation_action(request.action, request.resolution),
+    };
+
+    delegation_runtime::transition_delegation_task(existing, input)
+        .map_err(map_delegation_runtime_error)
+}
+
+fn to_runtime_delegation_action(
+    action: SettingsDelegationAction,
+    resolution: Option<SettingsDelegationResolution>,
+) -> DelegationRuntimeAction {
+    match action {
+        SettingsDelegationAction::Admit => DelegationRuntimeAction::Admit,
+        SettingsDelegationAction::Dispatch => DelegationRuntimeAction::Dispatch,
+        SettingsDelegationAction::Resolve => DelegationRuntimeAction::Resolve {
+            resolution: resolution.map(|value| match value {
+                SettingsDelegationResolution::Completed => RuntimeDelegationResolution::Completed,
+                SettingsDelegationResolution::Failed => RuntimeDelegationResolution::Failed,
+                SettingsDelegationResolution::Rejected => RuntimeDelegationResolution::Rejected,
+            }),
+        },
+        SettingsDelegationAction::Cancel => DelegationRuntimeAction::Cancel,
+    }
+}
+
+fn map_delegation_runtime_error(
+    error: delegation_runtime::DelegationRuntimeError,
+) -> WebUiV2HttpError {
+    match error.code {
+        DelegationRuntimeErrorCode::MissingResolution => {
+            bad_request_with("resolution", WebUiInboundValidationCode::Blank)
+        }
+        DelegationRuntimeErrorCode::InvalidResolvedProfile => {
+            bad_request_with("resolved_model_profile_id", WebUiInboundValidationCode::Blank)
+        }
+        DelegationRuntimeErrorCode::InvalidActionForNewTask => {
+            bad_request_with("action", WebUiInboundValidationCode::InvalidValue)
+        }
+        DelegationRuntimeErrorCode::ActorMismatch => {
+            bad_request_with("source_agent_id", WebUiInboundValidationCode::InvalidValue)
+        }
+        DelegationRuntimeErrorCode::InvalidTransition => {
+            bad_request_with("status", WebUiInboundValidationCode::InvalidValue)
+        }
+        DelegationRuntimeErrorCode::TerminalState => {
+            bad_request_with("task_id", WebUiInboundValidationCode::InvalidValue)
+        }
+    }
+}
+
+async fn require_settings_policy_decision(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    action: SettingsPolicyAction,
+) -> Result<(), WebUiV2HttpError> {
+    let response = state.services().list_operator_config(caller.clone()).await?;
+    let action_key = action.as_rule_key();
+
+    let denied = response
+        .entries
+        .into_iter()
+        .filter(|entry| entry.key.starts_with(SETTINGS_TOOL_POLICY_CONFIG_PREFIX))
+        .flat_map(|entry| {
+            entry
+                .value
+                .get("deny_rules")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|rule| rule.as_str().map(str::to_string))
+        .any(|rule| {
+            rule == "*"
+                || rule == action_key
+                || (rule == "delegation.*" && action_key.starts_with("delegation."))
+                || (rule == "tool.*" && action_key.starts_with("tool."))
+                || (rule == "channel.*" && action_key.starts_with("channel."))
+        });
+
+    if denied {
+        return Err(RebornServicesError {
+            code: RebornServicesErrorCode::Forbidden,
+            kind: RebornServicesErrorKind::ParticipantDenied,
+            status_code: 403,
+            retryable: false,
+            field: Some("policy".to_string()),
+            validation_code: None,
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
@@ -2857,6 +4455,110 @@ mod tests {
         assert_eq!(
             project_fs_list_path(Some("/workspace/sub".to_string())),
             "/workspace/sub"
+        );
+    }
+
+    fn delegation_request(action: SettingsDelegationAction) -> SettingsDelegationUpsertRequest {
+        SettingsDelegationUpsertRequest {
+            source_agent_id: "ceo".to_string(),
+            target_agent_id: "coder".to_string(),
+            requested_profile_id: "default".to_string(),
+            resolved_model_profile_id: None,
+            action,
+            resolution: None,
+            policy_context: None,
+            prompt: None,
+        }
+    }
+
+    fn delegation_record(status: DelegationStatus) -> serde_json::Value {
+        domain_record_value_without_id(DelegationTask {
+            id: "task-1".to_string(),
+            source_agent_id: "ceo".to_string(),
+            target_agent_id: "coder".to_string(),
+            requested_profile_id: "default".to_string(),
+            resolved_model_profile_id: "default".to_string(),
+            status,
+            policy_context: None,
+            prompt: None,
+            transition_count: 1,
+        })
+        .expect("record serializes without id")
+    }
+
+    #[test]
+    fn delegation_transition_admit_creates_new_task() {
+        let record = transition_delegation_task(
+            "task-1",
+            None,
+            delegation_request(SettingsDelegationAction::Admit),
+        )
+        .expect("admit should create task");
+
+        assert_eq!(record.status, DelegationStatus::Admitted);
+        assert_eq!(record.transition_count, 1);
+        assert_eq!(record.resolved_model_profile_id, "default");
+    }
+
+    #[test]
+    fn delegation_transition_rejects_non_admit_for_new_task() {
+        let err = transition_delegation_task(
+            "task-1",
+            None,
+            delegation_request(SettingsDelegationAction::Dispatch),
+        );
+        assert!(err.is_err(), "new task must start with admit action");
+    }
+
+    #[test]
+    fn delegation_transition_dispatch_from_admitted_succeeds() {
+        let record = transition_delegation_task(
+            "task-1",
+            Some(delegation_record(DelegationStatus::Admitted)),
+            delegation_request(SettingsDelegationAction::Dispatch),
+        )
+        .expect("dispatch should be valid from admitted");
+
+        assert_eq!(record.status, DelegationStatus::Dispatched);
+        assert_eq!(record.transition_count, 2);
+    }
+
+    #[test]
+    fn delegation_transition_resolve_requires_resolution() {
+        let err = transition_delegation_task(
+            "task-1",
+            Some(delegation_record(DelegationStatus::Dispatched)),
+            delegation_request(SettingsDelegationAction::Resolve),
+        );
+        assert!(err.is_err(), "resolve must provide a resolution value");
+    }
+
+    #[test]
+    fn delegation_transition_resolve_from_dispatched_succeeds() {
+        let mut request = delegation_request(SettingsDelegationAction::Resolve);
+        request.resolution = Some(SettingsDelegationResolution::Completed);
+
+        let record = transition_delegation_task(
+            "task-1",
+            Some(delegation_record(DelegationStatus::Dispatched)),
+            request,
+        )
+        .expect("resolve should be valid from dispatched");
+
+        assert_eq!(record.status, DelegationStatus::Completed);
+        assert_eq!(record.transition_count, 2);
+    }
+
+    #[test]
+    fn delegation_transition_rejects_terminal_tasks() {
+        let err = transition_delegation_task(
+            "task-1",
+            Some(delegation_record(DelegationStatus::Completed)),
+            delegation_request(SettingsDelegationAction::Cancel),
+        );
+        assert!(
+            err.is_err(),
+            "terminal delegation states must reject further transitions"
         );
     }
 }

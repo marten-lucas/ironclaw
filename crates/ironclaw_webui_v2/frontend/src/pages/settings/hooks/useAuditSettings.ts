@@ -15,6 +15,10 @@ function auditFromEntry(entry) {
     action: String(value.action || "update"),
     summary: String(value.summary || ""),
     created_at: String(value.created_at || new Date().toISOString()),
+    before_snapshot: value.before_snapshot ?? null,
+    after_snapshot: value.after_snapshot ?? null,
+    has_before_snapshot: value.before_snapshot != null,
+    has_after_snapshot: value.after_snapshot != null,
   };
 }
 

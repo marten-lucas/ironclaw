@@ -925,24 +925,6 @@ fn operator_setup_validation_error(field: &str) -> RebornServicesError {
     .into()
 }
 
-/// Stable WebUI-facing facade surface for beta Reborn routes.
-fn operator_setup_diagnostic(
-    key: &str,
-    severity: RebornOperatorConfigDiagnosticSeverity,
-    reason_code: &str,
-    message: &str,
-    remediation: &str,
-) -> RebornOperatorConfigDiagnostic {
-    RebornOperatorConfigDiagnostic {
-        key: key.to_string(),
-        severity,
-        reason_code: reason_code.to_string(),
-        message: message.to_string(),
-        owning_area: RebornOperatorArea::Setup,
-        remediation: remediation.to_string(),
-    }
-}
-
 const OPERATOR_SETUP_PROFILE_ID_MAX_BYTES: usize = 128;
 const OPERATOR_SETUP_WEBUI_TOKEN_MIN_BYTES: usize = 32;
 const OPERATOR_SETUP_WEBUI_TOKEN_MAX_BYTES: usize = 4096;
@@ -1752,19 +1734,6 @@ fn operator_doctor_status_text_needs_redaction(value: &str) -> bool {
         || lower.contains("api_key")
         || lower.contains("password")
         || lower.contains("credential")
-}
-
-fn operator_doctor_setup_unavailable_diagnostic(
-    reason_code: &str,
-    message: &str,
-) -> RebornOperatorConfigDiagnostic {
-    operator_setup_diagnostic(
-        "setup",
-        RebornOperatorConfigDiagnosticSeverity::Error,
-        reason_code,
-        message,
-        "Complete provider/model setup through the operator setup API or bootstrap configuration.",
-    )
 }
 
 fn operator_doctor_status_unavailable_diagnostic() -> RebornOperatorConfigDiagnostic {

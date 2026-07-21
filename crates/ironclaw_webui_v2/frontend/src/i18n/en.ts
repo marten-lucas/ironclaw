@@ -278,6 +278,18 @@ registerPack("en", {
   "audit.empty": "No audit entries yet.",
   "audit.validationTitle": "Validation guardrails",
   "audit.failedLoad": "Could not load audit entries: {message}",
+  "audit.showDiff": "Show diff",
+  "audit.hideDiff": "Hide diff",
+  "audit.loadingDiff": "Loading diff...",
+  "audit.diffFailed": "Could not load diff: {message}",
+  "audit.diffEmpty": "No field-level changes in this snapshot pair.",
+  "audit.restore": "Restore",
+  "audit.restoring": "Restoring...",
+  "audit.restoreSuccess": "Restore completed.",
+  "audit.restoreFailed": "Restore failed: {message}",
+  "audit.restoreUnsupported": "This audit entry cannot be restored.",
+  "audit.restoreReady": "This audit entry can be restored.",
+  "audit.restoreNotReady": "Restore unavailable: {reason}",
 
   // Settings — Trace Commons credits (read-only)
   "traceCommons.title": "Trace Commons credits",
