@@ -74,6 +74,8 @@ pub const WEBUI_V2_ROUTE_LIST_SETTINGS_MODEL_PROFILES: &str =
     "webui.v2.settings.list_model_profiles";
 pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_MODEL_PROFILE: &str =
     "webui.v2.settings.upsert_model_profile";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_MODEL_PROFILE: &str =
+    "webui.v2.settings.revert_model_profile";
 pub const WEBUI_V2_ROUTE_LIST_SETTINGS_IDENTITY: &str = "webui.v2.settings.list_identity";
 pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_IDENTITY: &str =
     "webui.v2.settings.upsert_identity";
@@ -91,6 +93,10 @@ pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_TOOL_POLICY: &str =
     "webui.v2.settings.revert_tool_policy";
 pub const WEBUI_V2_ROUTE_LIST_SETTINGS_AGENTS: &str = "webui.v2.settings.list_agents";
 pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_AGENT: &str = "webui.v2.settings.upsert_agent";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_AGENT: &str = "webui.v2.settings.revert_agent";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_CHANNEL_CONFIG: &str =
+    "webui.v2.settings.revert_channel_config";
+pub const WEBUI_V2_ROUTE_REVERT_SETTINGS_SKILL: &str = "webui.v2.settings.revert_skill";
 pub const WEBUI_V2_ROUTE_LIST_SETTINGS_DELEGATIONS: &str =
     "webui.v2.settings.list_delegations";
 pub const WEBUI_V2_ROUTE_UPSERT_SETTINGS_DELEGATION: &str =
@@ -212,6 +218,8 @@ pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILES: &str =
     "/api/webchat/v2/settings/model-profiles";
 pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_DETAIL: &str =
     "/api/webchat/v2/settings/model-profiles/{profile_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_REVERT: &str =
+    "/api/webchat/v2/settings/model-profiles/{profile_id}/revert";
 pub const WEBUI_V2_PATTERN_SETTINGS_IDENTITY: &str = "/api/webchat/v2/settings/identity";
 pub const WEBUI_V2_PATTERN_SETTINGS_IDENTITY_DETAIL: &str =
     "/api/webchat/v2/settings/identity/{identity_id}";
@@ -231,6 +239,12 @@ pub const WEBUI_V2_PATTERN_SETTINGS_TOOL_POLICY_REVERT: &str =
 pub const WEBUI_V2_PATTERN_SETTINGS_AGENTS: &str = "/api/webchat/v2/settings/agents";
 pub const WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL: &str =
     "/api/webchat/v2/settings/agents/{agent_id}";
+pub const WEBUI_V2_PATTERN_SETTINGS_AGENT_REVERT: &str =
+    "/api/webchat/v2/settings/agents/{agent_id}/revert";
+pub const WEBUI_V2_PATTERN_SETTINGS_CHANNEL_CONFIG_REVERT: &str =
+    "/api/webchat/v2/settings/channel-config/{config_id}/revert";
+pub const WEBUI_V2_PATTERN_SETTINGS_SKILL_REVERT: &str =
+    "/api/webchat/v2/settings/skills/{skill_id}/revert";
 pub const WEBUI_V2_PATTERN_SETTINGS_DELEGATIONS: &str =
     "/api/webchat/v2/settings/delegations";
 pub const WEBUI_V2_PATTERN_SETTINGS_DELEGATION_DETAIL: &str =
@@ -332,6 +346,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         set_settings_tool_permission_descriptor(),
         list_settings_model_profiles_descriptor(),
         upsert_settings_model_profile_descriptor(),
+        revert_settings_model_profile_descriptor(),
         list_settings_identity_descriptor(),
         upsert_settings_identity_descriptor(),
         revert_settings_identity_descriptor(),
@@ -343,6 +358,9 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         revert_settings_tool_policy_descriptor(),
         list_settings_agents_descriptor(),
         upsert_settings_agent_descriptor(),
+        revert_settings_agent_descriptor(),
+        revert_settings_channel_config_descriptor(),
+        revert_settings_skill_descriptor(),
         list_settings_delegations_descriptor(),
         upsert_settings_delegation_descriptor(),
         list_settings_audit_descriptor(),
@@ -1449,6 +1467,20 @@ fn upsert_settings_model_profile_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn revert_settings_model_profile_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_MODEL_PROFILE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_MODEL_PROFILE_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn list_settings_identity_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_SETTINGS_IDENTITY,
@@ -1596,6 +1628,48 @@ fn upsert_settings_agent_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_SETTINGS_AGENT_DETAIL,
         mutation_policy(
             body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn revert_settings_agent_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_AGENT,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_AGENT_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn revert_settings_channel_config_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_CHANNEL_CONFIG,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_CHANNEL_CONFIG_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn revert_settings_skill_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REVERT_SETTINGS_SKILL,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_SETTINGS_SKILL_REVERT,
+        mutation_policy(
+            body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,

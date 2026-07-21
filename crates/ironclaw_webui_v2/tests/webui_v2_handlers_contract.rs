@@ -1750,6 +1750,43 @@ async fn send_message_denied_when_tool_execution_policy_blocks_action() {
     );
 }
 
+#[tokio::test]
+async fn send_message_escalates_when_tool_execution_policy_requires_escalation() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "tool_policy.guard".to_string(),
+            serde_json::json!({ "scope": "global", "escalation_rules": ["tool.execution"] }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-from-path/messages")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"hi"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["kind"], "blocked_approval");
+    assert_eq!(body["field"], "policy_escalation_required");
+    assert_eq!(
+        services.submit_turn_calls.lock().expect("lock").len(),
+        0,
+        "tool-execution policy escalation must block facade submit_turn"
+    );
+}
+
 // Regression: RejectedBusy must round-trip as {"outcome":"rejected_busy","notice":"..."} on the
 // POST /messages wire. Per `.claude/rules/testing.md` "Test Through the Caller", the serde tag
 // sits between the axum handler and the browser — only a caller-level test catches a missing
@@ -3167,6 +3204,216 @@ async fn set_outbound_preferences_denied_when_channel_egress_policy_blocks_actio
 }
 
 #[tokio::test]
+async fn set_outbound_preferences_escalates_when_channel_egress_policy_requires_escalation() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "tool_policy.guard".to_string(),
+            serde_json::json!({ "scope": "global", "escalation_rules": ["channel.egress"] }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["kind"], "blocked_approval");
+    assert_eq!(body["field"], "policy_escalation_required");
+    assert!(
+        services
+            .set_outbound_preferences_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "channel-egress policy escalation must block facade set_outbound_preferences"
+    );
+}
+
+#[tokio::test]
+async fn set_outbound_preferences_writes_before_after_audit_snapshot() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/outbound/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"final_reply_target_id":"slack-dm-beta"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key.starts_with("audit.ch.")
+                && value["entity_type"] == "channel_config"
+                && value["entity_id"] == "outbound_preferences"
+                && value["action"] == "upsert"
+                && value["before_snapshot"]
+                    == serde_json::json!({ "final_reply_target_id": "slack-dm-alpha" })
+                && value["after_snapshot"]
+                    == serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
+        }),
+        "outbound preferences upsert must emit audit snapshot pair"
+    );
+}
+
+#[tokio::test]
+async fn revert_channel_config_uses_audit_before_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "channel_config",
+                "entity_id": "outbound_preferences",
+                "action": "upsert",
+                "before_snapshot": {
+                    "final_reply_target_id": "slack-dm-zeta"
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/channel-config/outbound_preferences/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-zeta");
+    let outbound_calls = services
+        .set_outbound_preferences_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(outbound_calls.len(), 1);
+    assert_eq!(
+        outbound_calls[0]
+            .final_reply_target_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("slack-dm-zeta")
+    );
+
+    let audit_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert!(
+        audit_calls.iter().any(|(key, value)| {
+            key.starts_with("audit.ch.")
+                && value["entity_type"] == "channel_config"
+                && value["entity_id"] == "outbound_preferences"
+                && value["action"] == "revert"
+        }),
+        "channel-config revert must emit audit"
+    );
+}
+
+#[tokio::test]
+async fn revert_skill_auto_activate_learned_uses_audit_before_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "skill",
+                "entity_id": "auto_activate_learned",
+                "action": "upsert",
+                "before_snapshot": {
+                    "kind": "auto_activate_learned",
+                    "enabled": true
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/skills/auto_activate_learned/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        *services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock"),
+        vec![true],
+        "skill learned-auto-activate revert must restore before_snapshot"
+    );
+    let audit_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert!(
+        audit_calls.iter().any(|(key, value)| {
+            key.starts_with("audit.sk.")
+                && value["entity_type"] == "skill"
+                && value["entity_id"] == "auto_activate_learned"
+                && value["action"] == "revert"
+        }),
+        "skill revert must emit audit"
+    );
+}
+
+#[tokio::test]
 async fn upsert_tool_policy_writes_before_after_audit_snapshot() {
     let services = Arc::new(StubServices::default());
     services
@@ -3249,6 +3496,148 @@ async fn upsert_tool_policy_writes_before_after_audit_snapshot() {
             "escalation_rules": [],
             "version": 2
         })
+    );
+}
+
+#[tokio::test]
+async fn upsert_model_profile_writes_before_after_audit_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "model_profile.default".to_string(),
+            serde_json::json!({
+                "model": "qwen3:14b",
+                "temperature": "0.1"
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/model-profiles/default")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"qwen3:32b","temperature":"0.2"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key == "model_profile.default"
+                && value
+                    == &serde_json::json!({
+                        "model": "qwen3:32b",
+                        "temperature": "0.2"
+                    })
+        }),
+        "model profile write must be forwarded"
+    );
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key.starts_with("audit.mp.")
+                && value["entity_type"] == "model_profile"
+                && value["entity_id"] == "default"
+                && value["action"] == "upsert"
+                && value["before_snapshot"]
+                    == serde_json::json!({
+                        "model": "qwen3:14b",
+                        "temperature": "0.1"
+                    })
+                && value["after_snapshot"]
+                    == serde_json::json!({
+                        "model": "qwen3:32b",
+                        "temperature": "0.2"
+                    })
+        }),
+        "model profile upsert must emit audit snapshot pair"
+    );
+}
+
+#[tokio::test]
+async fn revert_model_profile_uses_audit_before_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .extend([
+            operator_config_entry(
+                "model_profile.default".to_string(),
+                serde_json::json!({
+                    "model": "qwen3:32b",
+                    "temperature": "0.2"
+                }),
+            ),
+            operator_config_entry(
+                "audit.entry-1".to_string(),
+                serde_json::json!({
+                    "actor_id": "user",
+                    "entity_type": "model_profile",
+                    "entity_id": "default",
+                    "action": "upsert",
+                    "before_snapshot": {
+                        "model": "qwen3:14b",
+                        "temperature": "0.1"
+                    },
+                    "after_snapshot": null,
+                    "summary": null,
+                    "created_at": null
+                }),
+            ),
+        ]);
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/model-profiles/default/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key == "model_profile.default"
+                && value
+                    == &serde_json::json!({
+                        "model": "qwen3:14b",
+                        "temperature": "0.1"
+                    })
+        }),
+        "model profile revert must restore before_snapshot"
+    );
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key.starts_with("audit.mp.")
+                && value["entity_type"] == "model_profile"
+                && value["entity_id"] == "default"
+                && value["action"] == "revert"
+        }),
+        "model profile revert must emit audit"
     );
 }
 
@@ -3342,6 +3731,141 @@ async fn upsert_identity_writes_before_after_audit_snapshot() {
             "constraints": [],
             "version": 2
         })
+    );
+}
+
+#[tokio::test]
+async fn upsert_agent_writes_before_after_audit_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "agent.roster.ceo".to_string(),
+            serde_json::json!({
+                "display_name": "CEO",
+                "role": "orchestrator",
+                "default_profile_id": "default",
+                "policy_binding_id": "policy/global-safe",
+                "status": "active"
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/agents/ceo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"display_name":"CEO","role":"orchestrator","default_profile_id":"default","policy_binding_id":"policy/global-safe","status":"paused"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key == "agent.roster.ceo" && value["status"] == serde_json::json!("paused")
+        }),
+        "agent write must be forwarded"
+    );
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key.starts_with("audit.ag.")
+                && value["entity_type"] == "agent"
+                && value["entity_id"] == "ceo"
+                && value["action"] == "upsert"
+                && value["before_snapshot"]["status"] == serde_json::json!("active")
+                && value["after_snapshot"]["status"] == serde_json::json!("paused")
+        }),
+        "agent upsert must emit audit snapshot pair"
+    );
+}
+
+#[tokio::test]
+async fn revert_agent_uses_audit_before_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .extend([
+            operator_config_entry(
+                "agent.roster.ceo".to_string(),
+                serde_json::json!({
+                    "display_name": "CEO",
+                    "role": "orchestrator",
+                    "default_profile_id": "default",
+                    "policy_binding_id": "policy/global-safe",
+                    "status": "paused"
+                }),
+            ),
+            operator_config_entry(
+                "audit.entry-1".to_string(),
+                serde_json::json!({
+                    "actor_id": "user",
+                    "entity_type": "agent",
+                    "entity_id": "ceo",
+                    "action": "upsert",
+                    "before_snapshot": {
+                        "display_name": "CEO",
+                        "role": "orchestrator",
+                        "default_profile_id": "default",
+                        "policy_binding_id": "policy/global-safe",
+                        "status": "active"
+                    },
+                    "after_snapshot": null,
+                    "summary": null,
+                    "created_at": null
+                }),
+            ),
+        ]);
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/agents/ceo/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key == "agent.roster.ceo" && value["status"] == serde_json::json!("active")
+        }),
+        "agent revert must restore before_snapshot"
+    );
+    assert!(
+        calls.iter().any(|(key, value)| {
+            key.starts_with("audit.ag.")
+                && value["entity_type"] == "agent"
+                && value["entity_id"] == "ceo"
+                && value["action"] == "revert"
+        }),
+        "agent revert must emit audit"
     );
 }
 
@@ -4538,6 +5062,14 @@ async fn operator_config_routes_require_operator_capability() {
 #[tokio::test]
 async fn settings_tool_routes_do_not_require_operator_capability() {
     let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "model_profile.default".to_string(),
+            serde_json::json!({ "model": "qwen3:32b", "temperature": "0.2" }),
+        ));
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
 
     let response = router
@@ -4786,6 +5318,34 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
         .clone()
         .oneshot(
             Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/channel-config/outbound_preferences/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/skills/auto_activate_learned/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
                 .method(Method::GET)
                 .uri("/api/webchat/v2/settings/delegations")
                 .body(Body::empty())
@@ -4838,7 +5398,7 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
 
     assert_eq!(
         *services.list_operator_config_calls.lock().expect("lock"),
-        21
+        26
     );
     let set_calls = services
         .set_operator_config_key_calls
@@ -4876,6 +5436,125 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
                     == &serde_json::json!({ "actor_id": "user", "entity_type": "policy", "entity_id": "policy/global-safe", "action": "update", "before_snapshot": null, "after_snapshot": null, "summary": null, "created_at": null })
         }),
         "manual audit route write must still be forwarded"
+    );
+}
+
+#[tokio::test]
+async fn upsert_settings_delegation_escalates_when_policy_requires_approval() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "tool_policy.guard".to_string(),
+            serde_json::json!({ "scope": "global", "escalation_rules": ["delegation.*"] }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/delegations/task-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"source_agent_id":"ceo","target_agent_id":"coder","requested_profile_id":"default","action":"admit"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["kind"], "blocked_approval");
+    assert_eq!(body["field"], "policy_escalation_required");
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "delegation escalation must fail closed before write"
+    );
+}
+
+#[tokio::test]
+async fn upsert_settings_delegation_falls_back_to_default_profile_when_requested_missing() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "model_profile.default".to_string(),
+            serde_json::json!({ "model": "qwen3:32b", "temperature": "0.2" }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/delegations/task-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"source_agent_id":"ceo","target_agent_id":"coder","requested_profile_id":"coding","action":"admit"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    let delegation_write = set_calls
+        .iter()
+        .find(|(key, _)| key == "delegation.task-1")
+        .expect("delegation write");
+    assert_eq!(
+        delegation_write.1["requested_profile_id"],
+        serde_json::json!("coding")
+    );
+    assert_eq!(
+        delegation_write.1["resolved_model_profile_id"],
+        serde_json::json!("default")
+    );
+}
+
+#[tokio::test]
+async fn upsert_settings_delegation_rejects_when_no_profile_is_resolvable() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/delegations/task-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"source_agent_id":"ceo","target_agent_id":"coder","requested_profile_id":"coding","action":"admit"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "delegation write must fail closed when no profile is resolvable"
     );
 }
 

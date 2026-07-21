@@ -8,13 +8,16 @@ import { AppearanceTab } from "./components/appearance-tab";
 import { AuditTab } from "./components/audit-tab";
 import { ChannelsTab } from "./components/channels-tab";
 import { DelegationsTab } from "./components/delegations-tab";
+import { IdentityTab } from "./components/identity-tab";
 import { InferenceTab } from "./components/inference-tab";
 import { LanguageTab } from "./components/language-tab";
+import { MemoryTab } from "./components/memory-tab";
 import { ModelProfilesTab } from "./components/model-profiles-tab";
 import { NetworkingTab } from "./components/networking-tab";
 import { RestartBanner } from "./components/restart-banner";
 import { SkillsTab } from "./components/skills-tab";
 import { SettingsToolbar } from "./components/settings-toolbar";
+import { ToolPoliciesTab } from "./components/tool-policies-tab";
 import { ToolsTab } from "./components/tools-tab";
 import { TraceCommonsTab } from "./components/trace-commons-tab";
 import { UsersTab } from "./components/users-tab";
@@ -79,6 +82,9 @@ export function SettingsPage() {
     />),
     skills: (<SkillsTab searchQuery={searchQuery} />),
     modelProfiles: (<ModelProfilesTab searchQuery={searchQuery} />),
+    identity: (<IdentityTab searchQuery={searchQuery} />),
+    memory: (<MemoryTab searchQuery={searchQuery} />),
+    toolPolicies: (<ToolPoliciesTab searchQuery={searchQuery} />),
     agents: (<AgentsTab searchQuery={searchQuery} />),
     delegations: (<DelegationsTab searchQuery={searchQuery} />),
     audit: (<AuditTab searchQuery={searchQuery} />),

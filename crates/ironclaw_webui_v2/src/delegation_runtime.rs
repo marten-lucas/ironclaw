@@ -52,6 +52,12 @@ pub fn transition_delegation_task(
     current: Option<DelegationTask>,
     input: DelegationTransitionInput,
 ) -> Result<DelegationTask, DelegationRuntimeError> {
+    if input.requested_profile_id.trim().is_empty() {
+        return Err(DelegationRuntimeError::new(
+            DelegationRuntimeErrorCode::InvalidResolvedProfile,
+        ));
+    }
+
     if let Some(existing) = current {
         if !same_task_actors(&existing, &input) {
             return Err(DelegationRuntimeError::new(
@@ -99,14 +105,17 @@ pub fn transition_delegation_task(
             DelegationRuntimeAction::Cancel => DelegationStatus::Cancelled,
         };
 
+        let resolved_override = normalize_optional_non_blank_profile(
+            input.resolved_model_profile_id,
+            DelegationRuntimeErrorCode::InvalidResolvedProfile,
+        )?;
+
         return Ok(DelegationTask {
             id: existing.id,
             source_agent_id: existing.source_agent_id,
             target_agent_id: existing.target_agent_id,
             requested_profile_id: existing.requested_profile_id,
-            resolved_model_profile_id: input
-                .resolved_model_profile_id
-                .filter(|value| !value.trim().is_empty())
+            resolved_model_profile_id: resolved_override
                 .unwrap_or(existing.resolved_model_profile_id),
             status: next_status,
             policy_context: input.policy_context.or(existing.policy_context),
@@ -121,9 +130,11 @@ pub fn transition_delegation_task(
         ));
     }
 
-    let resolved_model_profile_id = input
-        .resolved_model_profile_id
-        .unwrap_or_else(|| input.requested_profile_id.clone());
+    let resolved_model_profile_id = normalize_optional_non_blank_profile(
+        input.resolved_model_profile_id,
+        DelegationRuntimeErrorCode::InvalidResolvedProfile,
+    )?
+    .unwrap_or_else(|| input.requested_profile_id.clone());
 
     if resolved_model_profile_id.trim().is_empty() {
         return Err(DelegationRuntimeError::new(
@@ -142,6 +153,22 @@ pub fn transition_delegation_task(
         prompt: input.prompt,
         transition_count: 1,
     })
+}
+
+fn normalize_optional_non_blank_profile(
+    value: Option<String>,
+    error_code: DelegationRuntimeErrorCode,
+) -> Result<Option<String>, DelegationRuntimeError> {
+    match value {
+        Some(candidate) => {
+            if candidate.trim().is_empty() {
+                Err(DelegationRuntimeError::new(error_code))
+            } else {
+                Ok(Some(candidate))
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 fn same_task_actors(existing: &DelegationTask, input: &DelegationTransitionInput) -> bool {
@@ -233,5 +260,23 @@ mod tests {
         let err = transition_delegation_task(Some(task(DelegationStatus::Admitted)), bad)
             .expect_err("mismatched actors reject transition");
         assert_eq!(err.code, DelegationRuntimeErrorCode::ActorMismatch);
+    }
+
+    #[test]
+    fn blank_requested_profile_is_rejected() {
+        let mut bad = input(DelegationRuntimeAction::Admit);
+        bad.requested_profile_id = "   ".to_string();
+        let err = transition_delegation_task(None, bad)
+            .expect_err("blank requested profile must fail closed");
+        assert_eq!(err.code, DelegationRuntimeErrorCode::InvalidResolvedProfile);
+    }
+
+    #[test]
+    fn blank_resolved_profile_override_is_rejected_for_existing_task() {
+        let mut bad = input(DelegationRuntimeAction::Dispatch);
+        bad.resolved_model_profile_id = Some("   ".to_string());
+        let err = transition_delegation_task(Some(task(DelegationStatus::Admitted)), bad)
+            .expect_err("blank resolved profile override must fail closed");
+        assert_eq!(err.code, DelegationRuntimeErrorCode::InvalidResolvedProfile);
     }
 }

@@ -47,6 +47,7 @@ use ironclaw_product_workflow::{
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
@@ -107,6 +108,12 @@ const SETTINGS_DELEGATION_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_DELEGATION_CONFIG_PREFIX.len();
 const SETTINGS_AUDIT_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_AUDIT_CONFIG_PREFIX.len();
+const SETTINGS_CHANNEL_CONFIG_ID_MAX_BYTES: usize = 64;
+const SETTINGS_SKILL_ID_MAX_BYTES: usize = OPERATOR_CONFIG_KEY_MAX_BYTES;
+const CHANNEL_CONFIG_OUTBOUND_PREFERENCES: &str = "outbound_preferences";
+const SKILL_RESTORE_AUTO_ACTIVATE_KIND: &str = "skill_auto_activate";
+const SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND: &str = "auto_activate_learned";
+const SKILL_AUTO_ACTIVATE_LEARNED_ENTITY_ID: &str = "auto_activate_learned";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -1490,10 +1497,21 @@ pub async fn set_outbound_preferences(
     Json(body): Json<RebornSetOutboundPreferencesRequest>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
     require_settings_policy_decision(&state, &caller, SettingsPolicyAction::ChannelEgress).await?;
+    let before_snapshot = load_outbound_preferences_snapshot(&state, &caller).await?;
     let response = state
         .services()
-        .set_outbound_preferences(caller, body)
+        .set_outbound_preferences(caller.clone(), body)
         .await?;
+    let after_snapshot = outbound_preferences_snapshot_from_response(&response);
+    write_generated_channel_config_audit(
+        &state,
+        &caller,
+        CHANNEL_CONFIG_OUTBOUND_PREFERENCES,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1591,10 +1609,21 @@ pub async fn set_skill_auto_activate(
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<SetSkillAutoActivateBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let before_snapshot = load_skill_auto_activate_snapshot(&state, &caller, &name).await?;
     let response = state
         .services()
-        .set_skill_auto_activate(caller, name, body.enabled)
+        .set_skill_auto_activate(caller.clone(), name.clone(), body.enabled)
         .await?;
+    let after_snapshot = skill_restore_snapshot(SKILL_RESTORE_AUTO_ACTIVATE_KIND, body.enabled);
+    write_generated_skill_audit(
+        &state,
+        &caller,
+        &name,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1604,10 +1633,22 @@ pub async fn set_auto_activate_learned(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SetSkillAutoActivateBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let before_snapshot = load_auto_activate_learned_snapshot(&state, &caller).await?;
     let response = state
         .services()
-        .set_auto_activate_learned(caller, body.enabled)
+        .set_auto_activate_learned(caller.clone(), body.enabled)
         .await?;
+    let after_snapshot =
+        skill_restore_snapshot(SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND, body.enabled);
+    write_generated_skill_audit(
+        &state,
+        &caller,
+        SKILL_AUTO_ACTIVATE_LEARNED_ENTITY_ID,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1868,6 +1909,13 @@ enum SettingsPolicyAction {
     DelegationCancel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsPolicyDecision {
+    Allow,
+    Deny,
+    Escalate,
+}
+
 impl SettingsPolicyAction {
     fn as_rule_key(self) -> &'static str {
         match self {
@@ -1931,6 +1979,16 @@ pub struct SettingsMemoryPath {
 #[derive(Debug, Deserialize)]
 pub struct SettingsToolPolicyPath {
     pub policy_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsChannelConfigPath {
+    pub config_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SettingsSkillRevertPath {
+    pub skill_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2017,12 +2075,32 @@ pub struct SettingsToolPolicyRevertRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsModelProfileRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsIdentityRevertRequest {
     pub audit_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsMemoryRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsAgentRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsChannelConfigRevertRequest {
+    pub audit_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsSkillRevertRequest {
     pub audit_id: String,
 }
 
@@ -2121,9 +2199,13 @@ pub struct SettingsAuditDiffResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RevertEntityKind {
+    ModelProfile,
     Identity,
     Memory,
     ToolPolicy,
+    Agent,
+    ChannelConfig,
+    Skill,
 }
 
 /// `GET /api/webchat/v2/settings/model-profiles`
@@ -2151,17 +2233,88 @@ pub async fn upsert_settings_model_profile(
     let key = validate_operator_config_key(format!(
         "{SETTINGS_MODEL_PROFILE_CONFIG_PREFIX}{profile_id}"
     ))?;
+    let before_snapshot = load_model_profile_snapshot(&state, &caller, &key).await?;
+    let after_snapshot = serde_json::to_value(&body).map_err(RebornServicesError::internal_from)?;
     let response = state
         .services()
         .set_operator_config_key(
-            caller,
+            caller.clone(),
             key,
             RebornOperatorConfigSetRequest {
-                value: serde_json::to_value(body)
-                    .map_err(RebornServicesError::internal_from)?,
+                value: after_snapshot.clone(),
             },
         )
         .await?;
+    write_generated_model_profile_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
+    if response
+        .entry
+        .key
+        .starts_with(SETTINGS_MODEL_PROFILE_CONFIG_PREFIX)
+    {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `POST /api/webchat/v2/settings/model-profiles/{profile_id}/revert`
+pub async fn revert_settings_model_profile(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsModelProfilePath { profile_id }): Path<SettingsModelProfilePath>,
+    Json(body): Json<SettingsModelProfileRevertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("profile_id", &profile_id, SETTINGS_MODEL_PROFILE_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+
+    let profile_key = validate_operator_config_key(format!(
+        "{SETTINGS_MODEL_PROFILE_CONFIG_PREFIX}{profile_id}"
+    ))?;
+    let current_snapshot = load_model_profile_snapshot(&state, &caller, &profile_key).await?;
+
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::ModelProfile,
+        &profile_id,
+        SETTINGS_MODEL_PROFILE_ID_MAX_BYTES,
+    )
+    .await?;
+
+    let value = model_profile_from_snapshot(snapshot)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller.clone(),
+            profile_key,
+            RebornOperatorConfigSetRequest { value },
+        )
+        .await?;
+
+    write_generated_model_profile_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
     if response
         .entry
         .key
@@ -2627,6 +2780,7 @@ pub async fn upsert_settings_agent(
         GovernedAuthoringKind::Agent,
         &agent_id,
     ))?;
+    let before_snapshot = load_agent_snapshot(&state, &caller, &key).await?;
     let entry = AgentRosterEntry {
         id: agent_id,
         display_name: body.display_name,
@@ -2636,10 +2790,20 @@ pub async fn upsert_settings_agent(
         status: body.status,
     };
     let value = domain_record_value_without_id(entry).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
     let response = state
         .services()
-        .set_operator_config_key(caller, key, RebornOperatorConfigSetRequest { value })
+        .set_operator_config_key(caller.clone(), key, RebornOperatorConfigSetRequest { value })
         .await?;
+    write_generated_agent_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
     if response.entry.key.starts_with(SETTINGS_AGENT_CONFIG_PREFIX) {
         return Ok(Json(response));
     }
@@ -2648,6 +2812,172 @@ pub async fn upsert_settings_agent(
         WebUiInboundValidationCode::InvalidValue,
     ))
     .into())
+}
+
+/// `POST /api/webchat/v2/settings/agents/{agent_id}/revert`
+pub async fn revert_settings_agent(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsAgentPath { agent_id }): Path<SettingsAgentPath>,
+    Json(body): Json<SettingsAgentRevertRequest>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("agent_id", &agent_id, SETTINGS_AGENT_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+
+    let agent_key = validate_operator_config_key(governed_authoring::config_key(
+        GovernedAuthoringKind::Agent,
+        &agent_id,
+    ))?;
+    let current_snapshot = load_agent_snapshot(&state, &caller, &agent_key).await?;
+
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::Agent,
+        &agent_id,
+        SETTINGS_AGENT_ID_MAX_BYTES,
+    )
+    .await?;
+
+    let entry = agent_from_snapshot(&agent_id, snapshot)?;
+    let value = domain_record_value_without_id(entry).map_err(RebornServicesError::internal_from)?;
+    let after_snapshot = value.clone();
+    let response = state
+        .services()
+        .set_operator_config_key(
+            caller.clone(),
+            agent_key,
+            RebornOperatorConfigSetRequest { value },
+        )
+        .await?;
+
+    write_generated_agent_audit(
+        &state,
+        &caller,
+        &response.entry.key,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
+    if response.entry.key.starts_with(SETTINGS_AGENT_CONFIG_PREFIX) {
+        return Ok(Json(response));
+    }
+    Err(RebornServicesError::from(WebUiInboundValidationError::new(
+        "key",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
+    .into())
+}
+
+/// `POST /api/webchat/v2/settings/channel-config/{config_id}/revert`
+pub async fn revert_settings_channel_config(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsChannelConfigPath { config_id }): Path<SettingsChannelConfigPath>,
+    Json(body): Json<SettingsChannelConfigRevertRequest>,
+) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("config_id", &config_id, SETTINGS_CHANNEL_CONFIG_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+    if config_id != CHANNEL_CONFIG_OUTBOUND_PREFERENCES {
+        return Err(bad_request_with("config_id", WebUiInboundValidationCode::InvalidValue));
+    }
+
+    let current_snapshot = load_outbound_preferences_snapshot(&state, &caller).await?;
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::ChannelConfig,
+        &config_id,
+        SETTINGS_CHANNEL_CONFIG_ID_MAX_BYTES,
+    )
+    .await?;
+    let request = outbound_preferences_request_from_snapshot(snapshot)?;
+
+    let response = state
+        .services()
+        .set_outbound_preferences(caller.clone(), request)
+        .await?;
+
+    let after_snapshot = outbound_preferences_snapshot_from_response(&response);
+    write_generated_channel_config_audit(
+        &state,
+        &caller,
+        &config_id,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/settings/skills/{skill_id}/revert`
+pub async fn revert_settings_skill(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(_capabilities): Extension<WebUiV2Capabilities>,
+    Path(SettingsSkillRevertPath { skill_id }): Path<SettingsSkillRevertPath>,
+    Json(body): Json<SettingsSkillRevertRequest>,
+) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    validate_settings_config_entity_id("skill_id", &skill_id, SETTINGS_SKILL_ID_MAX_BYTES)?;
+    validate_settings_config_entity_id("audit_id", &body.audit_id, SETTINGS_AUDIT_ID_MAX_BYTES)?;
+
+    let snapshot = load_revert_before_snapshot(
+        &state,
+        &caller,
+        &body.audit_id,
+        RevertEntityKind::Skill,
+        &skill_id,
+        SETTINGS_SKILL_ID_MAX_BYTES,
+    )
+    .await?;
+    let restore = skill_restore_from_snapshot(snapshot)?;
+
+    let current_snapshot = if restore.kind == SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND {
+        if skill_id != SKILL_AUTO_ACTIVATE_LEARNED_ENTITY_ID {
+            return Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue));
+        }
+        load_auto_activate_learned_snapshot(&state, &caller).await?
+    } else {
+        load_skill_auto_activate_snapshot(&state, &caller, &skill_id).await?
+    };
+
+    let response = if restore.kind == SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND {
+        state
+            .services()
+            .set_auto_activate_learned(caller.clone(), restore.enabled)
+            .await?
+    } else {
+        state
+            .services()
+            .set_skill_auto_activate(caller.clone(), skill_id.clone(), restore.enabled)
+            .await?
+    };
+
+    let after_snapshot = skill_restore_snapshot(restore.kind, restore.enabled);
+    let audit_entity_id = if restore.kind == SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND {
+        SKILL_AUTO_ACTIVATE_LEARNED_ENTITY_ID
+    } else {
+        &skill_id
+    };
+    write_generated_skill_audit(
+        &state,
+        &caller,
+        audit_entity_id,
+        current_snapshot,
+        after_snapshot,
+        "revert",
+    )
+    .await?;
+
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/settings/delegations`
@@ -2701,12 +3031,27 @@ pub async fn upsert_settings_delegation(
     )
     .await?;
 
+    let resolved_model_profile_id = resolve_settings_model_profile_id(
+        &state,
+        &caller,
+        &body.requested_profile_id,
+        body.resolved_model_profile_id.as_deref(),
+    )
+    .await?;
+
     let key = validate_operator_config_key(governed_authoring::config_key(
         GovernedAuthoringKind::Delegation,
         &task_id,
     ))?;
     let current = load_operator_config_value(&state, &caller, &key).await?;
-    let next = transition_delegation_task(&task_id, current, body)?;
+    let next = transition_delegation_task(
+        &task_id,
+        current,
+        SettingsDelegationUpsertRequest {
+            resolved_model_profile_id: Some(resolved_model_profile_id),
+            ..body
+        },
+    )?;
     let value = domain_record_value_without_id(next).map_err(RebornServicesError::internal_from)?;
     let response = state
         .services()
@@ -2914,6 +3259,68 @@ fn validate_memory_revert_target(
     Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
 }
 
+fn validate_model_profile_revert_target(
+    entry: &AuditEntry,
+    profile_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "model_profile";
+    let valid_entity_id = entry.entity_id == profile_id
+        || entry.entity_id == format!("model_profile.{profile_id}")
+        || entry.entity_id == format!("model_profile/{profile_id}")
+        || entry.entity_id == format!("profile.{profile_id}")
+        || entry.entity_id == format!("profile/{profile_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+fn validate_agent_revert_target(
+    entry: &AuditEntry,
+    agent_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "agent";
+    let valid_entity_id = entry.entity_id == agent_id
+        || entry.entity_id == format!("agent.{agent_id}")
+        || entry.entity_id == format!("agent/{agent_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+fn validate_channel_config_revert_target(
+    entry: &AuditEntry,
+    config_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "channel_config";
+    let valid_entity_id = entry.entity_id == config_id
+        || entry.entity_id == format!("channel_config.{config_id}")
+        || entry.entity_id == format!("channel_config/{config_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
+fn validate_skill_revert_target(
+    entry: &AuditEntry,
+    skill_id: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let valid_entity_type = entry.entity_type == "skill";
+    let valid_entity_id = entry.entity_id == skill_id
+        || entry.entity_id == format!("skill.{skill_id}")
+        || entry.entity_id == format!("skill/{skill_id}");
+
+    if valid_entity_type && valid_entity_id {
+        return Ok(());
+    }
+    Err(bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+}
+
 async fn load_revert_before_snapshot(
     state: &WebUiV2State,
     caller: &WebUiAuthenticatedCaller,
@@ -2933,9 +3340,17 @@ async fn load_revert_before_snapshot(
         domain_record_from_key_value(GovernedAuthoringKind::Audit, &audit_key, audit_value)?;
 
     match entity_kind {
+        RevertEntityKind::ModelProfile => {
+            validate_model_profile_revert_target(&audit_entry, entity_id)?
+        }
         RevertEntityKind::Identity => validate_identity_revert_target(&audit_entry, entity_id)?,
         RevertEntityKind::Memory => validate_memory_revert_target(&audit_entry, entity_id)?,
         RevertEntityKind::ToolPolicy => validate_tool_policy_revert_target(&audit_entry, entity_id)?,
+        RevertEntityKind::Agent => validate_agent_revert_target(&audit_entry, entity_id)?,
+        RevertEntityKind::ChannelConfig => {
+            validate_channel_config_revert_target(&audit_entry, entity_id)?
+        }
+        RevertEntityKind::Skill => validate_skill_revert_target(&audit_entry, entity_id)?,
     }
 
     audit_entry
@@ -3035,6 +3450,9 @@ fn restore_validation_for_audit_entry(entry: &AuditEntry) -> SettingsAuditRestor
     }
 
     let revert_endpoint = match entity_kind {
+        RevertEntityKind::ModelProfile => {
+            format!("/api/webchat/v2/settings/model-profiles/{canonical_entity_id}/revert")
+        }
         RevertEntityKind::Identity => {
             format!("/api/webchat/v2/settings/identity/{canonical_entity_id}/revert")
         }
@@ -3043,6 +3461,15 @@ fn restore_validation_for_audit_entry(entry: &AuditEntry) -> SettingsAuditRestor
         }
         RevertEntityKind::ToolPolicy => {
             format!("/api/webchat/v2/settings/tool-policies/{canonical_entity_id}/revert")
+        }
+        RevertEntityKind::Agent => {
+            format!("/api/webchat/v2/settings/agents/{canonical_entity_id}/revert")
+        }
+        RevertEntityKind::ChannelConfig => {
+            format!("/api/webchat/v2/settings/channel-config/{canonical_entity_id}/revert")
+        }
+        RevertEntityKind::Skill => {
+            format!("/api/webchat/v2/settings/skills/{canonical_entity_id}/revert")
         }
     };
 
@@ -3056,6 +3483,8 @@ fn restore_validation_for_audit_entry(entry: &AuditEntry) -> SettingsAuditRestor
 
 fn parse_restore_target(entry: &AuditEntry) -> Option<(RevertEntityKind, String)> {
     match entry.entity_type.as_str() {
+        "model_profile" | "profile" => extract_model_profile_entity_id(&entry.entity_id)
+            .map(|id| (RevertEntityKind::ModelProfile, id)),
         "identity" => extract_canonical_entity_id(&entry.entity_id, "identity")
             .map(|id| (RevertEntityKind::Identity, id)),
         "memory" => {
@@ -3064,6 +3493,12 @@ fn parse_restore_target(entry: &AuditEntry) -> Option<(RevertEntityKind, String)
         }
         "tool_policy" | "policy" => extract_tool_policy_entity_id(&entry.entity_id)
             .map(|id| (RevertEntityKind::ToolPolicy, id)),
+        "agent" => extract_canonical_entity_id(&entry.entity_id, "agent")
+            .map(|id| (RevertEntityKind::Agent, id)),
+        "channel_config" => extract_channel_config_entity_id(&entry.entity_id)
+            .map(|id| (RevertEntityKind::ChannelConfig, id)),
+        "skill" => extract_skill_entity_id(&entry.entity_id)
+            .map(|id| (RevertEntityKind::Skill, id)),
         _ => None,
     }
 }
@@ -3086,6 +3521,42 @@ fn extract_tool_policy_entity_id(entity_id: &str) -> Option<String> {
         return None;
     }
     for prefix in ["tool_policy.", "tool_policy/", "policy.", "policy/"] {
+        if let Some(stripped) = entity_id.strip_prefix(prefix) {
+            return (!stripped.is_empty()).then(|| stripped.to_string());
+        }
+    }
+    Some(entity_id.to_string())
+}
+
+fn extract_model_profile_entity_id(entity_id: &str) -> Option<String> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    for prefix in ["model_profile.", "model_profile/", "profile.", "profile/"] {
+        if let Some(stripped) = entity_id.strip_prefix(prefix) {
+            return (!stripped.is_empty()).then(|| stripped.to_string());
+        }
+    }
+    Some(entity_id.to_string())
+}
+
+fn extract_channel_config_entity_id(entity_id: &str) -> Option<String> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    for prefix in ["channel_config.", "channel_config/"] {
+        if let Some(stripped) = entity_id.strip_prefix(prefix) {
+            return (!stripped.is_empty()).then(|| stripped.to_string());
+        }
+    }
+    Some(entity_id.to_string())
+}
+
+fn extract_skill_entity_id(entity_id: &str) -> Option<String> {
+    if entity_id.is_empty() {
+        return None;
+    }
+    for prefix in ["skill.", "skill/"] {
         if let Some(stripped) = entity_id.strip_prefix(prefix) {
             return (!stripped.is_empty()).then(|| stripped.to_string());
         }
@@ -3153,6 +3624,129 @@ fn tool_policy_from_snapshot(
     }
 }
 
+fn model_profile_from_snapshot(
+    snapshot: serde_json::Value,
+) -> Result<serde_json::Value, WebUiV2HttpError> {
+    match snapshot {
+        serde_json::Value::Object(_) => Ok(snapshot),
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
+}
+
+fn agent_from_snapshot(
+    agent_id: &str,
+    snapshot: serde_json::Value,
+) -> Result<AgentRosterEntry, WebUiV2HttpError> {
+    match snapshot {
+        serde_json::Value::Object(mut map) => {
+            map.insert(
+                "id".to_string(),
+                serde_json::Value::String(agent_id.to_string()),
+            );
+            serde_json::from_value(serde_json::Value::Object(map))
+                .map_err(|_| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))
+        }
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
+}
+
+fn outbound_preferences_request_from_snapshot(
+    snapshot: serde_json::Value,
+) -> Result<RebornSetOutboundPreferencesRequest, WebUiV2HttpError> {
+    match snapshot {
+        serde_json::Value::Object(mut map) => {
+            let target = map.remove("final_reply_target_id");
+            let final_reply_target_id = match target {
+                Some(serde_json::Value::Null) | None => None,
+                Some(serde_json::Value::String(value)) => {
+                    Some(RebornOutboundDeliveryTargetId::new(value).map_err(|_| {
+                        bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue)
+                    })?)
+                }
+                _ => {
+                    return Err(bad_request_with(
+                        "audit_id",
+                        WebUiInboundValidationCode::InvalidValue,
+                    ));
+                }
+            };
+            Ok(RebornSetOutboundPreferencesRequest {
+                final_reply_target_id,
+            })
+        }
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SkillRestoreSnapshot<'a> {
+    kind: &'a str,
+    enabled: bool,
+}
+
+fn skill_restore_from_snapshot(
+    snapshot: serde_json::Value,
+) -> Result<SkillRestoreSnapshot<'static>, WebUiV2HttpError> {
+    let serde_json::Value::Object(map) = snapshot else {
+        return Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        ));
+    };
+
+    let kind = map
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
+    let enabled = map
+        .get("enabled")
+        .and_then(|value| value.as_bool())
+        .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
+
+    let canonical_kind = match kind {
+        SKILL_RESTORE_AUTO_ACTIVATE_KIND => SKILL_RESTORE_AUTO_ACTIVATE_KIND,
+        SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND => SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND,
+        _ => {
+            return Err(bad_request_with(
+                "audit_id",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
+    };
+
+    Ok(SkillRestoreSnapshot {
+        kind: canonical_kind,
+        enabled,
+    })
+}
+
+fn skill_restore_snapshot(kind: &str, enabled: bool) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind,
+        "enabled": enabled,
+    })
+}
+
+fn outbound_preferences_snapshot_from_response(
+    response: &RebornOutboundPreferencesResponse,
+) -> serde_json::Value {
+    serde_json::json!({
+        "final_reply_target_id": response
+            .final_reply_target
+            .as_ref()
+            .map(|target| target.target_id.as_str().to_string())
+    })
+}
+
 fn generated_audit_id(prefix: &str, entity_id: &str) -> String {
     let now_millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3218,6 +3812,78 @@ async fn load_memory_snapshot(
     let normalized =
         domain_record_value_without_id(record).map_err(RebornServicesError::internal_from)?;
     Ok(Some(normalized))
+}
+
+async fn load_model_profile_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    load_operator_config_value(state, caller, key).await
+}
+
+async fn load_agent_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    let value = load_operator_config_value(state, caller, key).await?;
+    let Some(snapshot) = value else {
+        return Ok(None);
+    };
+
+    let record: AgentRosterEntry =
+        domain_record_from_key_value(GovernedAuthoringKind::Agent, key, snapshot)?;
+    let normalized =
+        domain_record_value_without_id(record).map_err(RebornServicesError::internal_from)?;
+    Ok(Some(normalized))
+}
+
+async fn load_outbound_preferences_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    match state.services().get_outbound_preferences(caller.clone()).await {
+        Ok(response) => Ok(Some(outbound_preferences_snapshot_from_response(&response))),
+        Err(error) => {
+            tracing::debug!(?error, "failed to read outbound preferences snapshot for audit");
+            Ok(None)
+        }
+    }
+}
+
+async fn load_skill_auto_activate_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    skill_name: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    match state.services().list_skills(caller.clone()).await {
+        Ok(response) => Ok(response
+            .skills
+            .iter()
+            .find(|skill| skill.name == skill_name)
+            .map(|skill| skill_restore_snapshot(SKILL_RESTORE_AUTO_ACTIVATE_KIND, skill.auto_activate))),
+        Err(error) => {
+            tracing::debug!(?error, "failed to read skill auto-activate snapshot for audit");
+            Ok(None)
+        }
+    }
+}
+
+async fn load_auto_activate_learned_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    match state.services().list_skills(caller.clone()).await {
+        Ok(response) => Ok(Some(skill_restore_snapshot(
+            SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND,
+            response.auto_activate_learned,
+        ))),
+        Err(error) => {
+            tracing::debug!(?error, "failed to read global skill auto-activate snapshot for audit");
+            Ok(None)
+        }
+    }
 }
 
 async fn write_generated_tool_policy_audit(
@@ -3289,6 +3955,95 @@ async fn write_generated_memory_audit(
     .await
 }
 
+async fn write_generated_model_profile_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let profile_id = key
+        .strip_prefix(SETTINGS_MODEL_PROFILE_CONFIG_PREFIX)
+        .ok_or_else(|| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))?;
+    write_generated_entity_audit(
+        state,
+        caller,
+        "mp",
+        "model_profile",
+        profile_id.to_string(),
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
+async fn write_generated_agent_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    key: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    let agent_id = governed_authoring::parse_config_key(GovernedAuthoringKind::Agent, key)
+        .ok_or_else(|| bad_request_with("key", WebUiInboundValidationCode::InvalidValue))?;
+    write_generated_entity_audit(
+        state,
+        caller,
+        "ag",
+        "agent",
+        agent_id,
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
+async fn write_generated_channel_config_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    config_id: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    write_generated_entity_audit(
+        state,
+        caller,
+        "ch",
+        "channel_config",
+        config_id.to_string(),
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
+async fn write_generated_skill_audit(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    skill_id: &str,
+    before_snapshot: Option<serde_json::Value>,
+    normalized_after_snapshot: serde_json::Value,
+    action: &str,
+) -> Result<(), WebUiV2HttpError> {
+    write_generated_entity_audit(
+        state,
+        caller,
+        "sk",
+        "skill",
+        skill_id.to_string(),
+        action,
+        before_snapshot,
+        normalized_after_snapshot,
+    )
+    .await
+}
+
 async fn write_generated_entity_audit(
     state: &WebUiV2State,
     caller: &WebUiAuthenticatedCaller,
@@ -3344,6 +4099,49 @@ fn validate_settings_agent_payload(body: &SettingsAgentUpsertRequest) -> Result<
         return Err(bad_request_with("status", WebUiInboundValidationCode::Blank));
     }
     Ok(())
+}
+
+async fn resolve_settings_model_profile_id(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    requested_profile_id: &str,
+    explicit_resolved_profile_id: Option<&str>,
+) -> Result<String, WebUiV2HttpError> {
+    let response = state.services().list_operator_config(caller.clone()).await?;
+    let has_model_profile = |profile_id: &str| {
+        let key = format!("{SETTINGS_MODEL_PROFILE_CONFIG_PREFIX}{profile_id}");
+        response.entries.iter().any(|entry| entry.key == key)
+    };
+
+    if let Some(explicit) = explicit_resolved_profile_id {
+        validate_settings_config_entity_id(
+            "resolved_model_profile_id",
+            explicit,
+            SETTINGS_MODEL_PROFILE_ID_MAX_BYTES,
+        )?;
+        if has_model_profile(explicit) {
+            return Ok(explicit.to_string());
+        }
+        if has_model_profile("default") {
+            return Ok("default".to_string());
+        }
+        return Err(bad_request_with(
+            "resolved_model_profile_id",
+            WebUiInboundValidationCode::InvalidValue,
+        ));
+    }
+
+    if has_model_profile(requested_profile_id) {
+        return Ok(requested_profile_id.to_string());
+    }
+    if has_model_profile("default") {
+        return Ok("default".to_string());
+    }
+
+    Err(bad_request_with(
+        "requested_profile_id",
+        WebUiInboundValidationCode::InvalidValue,
+    ))
 }
 
 fn delegation_policy_action(action: SettingsDelegationAction) -> SettingsPolicyAction {
@@ -3552,29 +4350,11 @@ async fn require_settings_policy_decision(
     let response = state.services().list_operator_config(caller.clone()).await?;
     let action_key = action.as_rule_key();
 
-    let denied = response
-        .entries
-        .into_iter()
-        .filter(|entry| entry.key.starts_with(SETTINGS_TOOL_POLICY_CONFIG_PREFIX))
-        .flat_map(|entry| {
-            entry
-                .value
-                .get("deny_rules")
-                .and_then(|value| value.as_array())
-                .cloned()
-                .unwrap_or_default()
-        })
-        .filter_map(|rule| rule.as_str().map(str::to_string))
-        .any(|rule| {
-            rule == "*"
-                || rule == action_key
-                || (rule == "delegation.*" && action_key.starts_with("delegation."))
-                || (rule == "tool.*" && action_key.starts_with("tool."))
-                || (rule == "channel.*" && action_key.starts_with("channel."))
-        });
+    let decision = evaluate_settings_policy_decision(&response, action_key);
 
-    if denied {
-        return Err(RebornServicesError {
+    match decision {
+        SettingsPolicyDecision::Allow => Ok(()),
+        SettingsPolicyDecision::Deny => Err(RebornServicesError {
             code: RebornServicesErrorCode::Forbidden,
             kind: RebornServicesErrorKind::ParticipantDenied,
             status_code: 403,
@@ -3582,10 +4362,17 @@ async fn require_settings_policy_decision(
             field: Some("policy".to_string()),
             validation_code: None,
         }
-        .into());
+        .into()),
+        SettingsPolicyDecision::Escalate => Err(RebornServicesError {
+            code: RebornServicesErrorCode::Forbidden,
+            kind: RebornServicesErrorKind::BlockedApproval,
+            status_code: 403,
+            retryable: false,
+            field: Some("policy_escalation_required".to_string()),
+            validation_code: None,
+        }
+        .into()),
     }
-
-    Ok(())
 }
 
 fn validate_settings_tool_capability_id(capability_id: &str) -> Result<(), WebUiV2HttpError> {
@@ -3682,7 +4469,55 @@ fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpErr
     RebornServicesError::from(WebUiInboundValidationError::new("key", code)).into()
 }
 
-/// `GET /api/webchat/v2/operator/config/{key}`
+fn evaluate_settings_policy_decision(
+    response: &RebornOperatorConfigListResponse,
+    action_key: &str,
+) -> SettingsPolicyDecision {
+    // Deny is strongest: any matching deny rule wins immediately. Escalate is
+    // second-strongest and applies when no deny matched.
+    let mut escalated = false;
+
+    for entry in response
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with(SETTINGS_TOOL_POLICY_CONFIG_PREFIX))
+    {
+        if let Some(rules) = entry.value.get("deny_rules").and_then(|value| value.as_array()) {
+            let denied = rules
+                .iter()
+                .filter_map(|rule| rule.as_str())
+                .any(|rule| policy_rule_matches_action(rule, action_key));
+            if denied {
+                return SettingsPolicyDecision::Deny;
+            }
+        }
+
+        if let Some(rules) = entry
+            .value
+            .get("escalation_rules")
+            .and_then(|value| value.as_array())
+        {
+            escalated |= rules
+                .iter()
+                .filter_map(|rule| rule.as_str())
+                .any(|rule| policy_rule_matches_action(rule, action_key));
+        }
+    }
+
+    if escalated {
+        SettingsPolicyDecision::Escalate
+    } else {
+        SettingsPolicyDecision::Allow
+    }
+}
+
+fn policy_rule_matches_action(rule: &str, action_key: &str) -> bool {
+    rule == "*"
+        || rule == action_key
+        || (rule == "delegation.*" && action_key.starts_with("delegation."))
+        || (rule == "tool.*" && action_key.starts_with("tool."))
+        || (rule == "channel.*" && action_key.starts_with("channel."))
+}
 pub async fn get_operator_config_key(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,

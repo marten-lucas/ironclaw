@@ -1542,10 +1542,6 @@ fn sanitize_prompt_from_bridge_or_text(event: &TalkEvent, rendered: &str, bot_na
 }
 
 fn event_mentions_bot(event: &TalkEvent, bot_name: &str, rendered: &str) -> bool {
-    if is_direct_or_two_party_context(event) {
-        return true;
-    }
-
     if extract_declared_reply_user_id(event).is_some() {
         return true;
     }
@@ -1577,25 +1573,6 @@ fn event_mentions_bot(event: &TalkEvent, bot_name: &str, rendered: &str) -> bool
 
     let addressed = strip_leading_bot_addressing(trimmed_source, bot_name);
     addressed != trimmed_source
-}
-
-fn is_direct_or_two_party_context(event: &TalkEvent) -> bool {
-    let room_type = event
-        .target
-        .as_ref()
-        .and_then(|target| target.room_type.as_deref())
-        .or_else(|| event.object.as_ref().and_then(|obj| obj.room_type.as_deref()))
-        .map(|value| value.trim().to_ascii_lowercase());
-    if matches!(room_type.as_deref(), Some("one_to_one" | "one-to-one" | "direct" | "direct_message" | "dm" | "1on1" | "one2one")) {
-        return true;
-    }
-
-    let participants = event
-        .target
-        .as_ref()
-        .and_then(|target| target.participant_count)
-        .or_else(|| event.object.as_ref().and_then(|obj| obj.participant_count));
-    matches!(participants, Some(count) if count <= 2)
 }
 
 fn strip_bot_mention_entities(text: &str, entities: &[TalkMentionEntity]) -> String {
@@ -1824,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_talk_event_accepts_create_with_or_without_mention() {
+    fn parse_talk_event_accepts_create_when_message_mentions_bot() {
         let event = TalkEvent {
             event_type: "Create".to_string(),
             actor: Some(TalkActor {
@@ -2026,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_talk_event_accepts_direct_message_without_mention() {
+    fn parse_talk_event_ignores_direct_message_without_mention() {
         let event = TalkEvent {
             event_type: "Create".to_string(),
             actor: Some(TalkActor {
@@ -2052,13 +2029,15 @@ mod tests {
         };
 
         let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
-            .expect("parse result")
-            .expect("direct messages should not require explicit mention");
-        assert_user_message_payload(parsed, "bitte kurz zusammenfassen", ProductTriggerReason::DirectChat);
+            .expect("parse result");
+        assert!(
+            parsed.is_none(),
+            "direct messages without bot mention must be ignored"
+        );
     }
 
     #[test]
-    fn parse_talk_event_accepts_two_party_room_without_mention() {
+    fn parse_talk_event_ignores_two_party_room_without_mention() {
         let event = TalkEvent {
             event_type: "Create".to_string(),
             actor: Some(TalkActor {
@@ -2084,9 +2063,11 @@ mod tests {
         };
 
         let parsed = parse_talk_event(&event, "ironclaw", &default_model_profiles())
-            .expect("parse result")
-            .expect("two-party rooms should not require explicit mention");
-        assert_user_message_payload(parsed, "status?", ProductTriggerReason::DirectChat);
+            .expect("parse result");
+        assert!(
+            parsed.is_none(),
+            "two-party rooms without bot mention must be ignored"
+        );
     }
 
     #[test]
@@ -2101,7 +2082,7 @@ mod tests {
             object: Some(TalkObject {
                 id: Some("323".to_string()),
                 room_name: None,
-                content: Some("/profile coding bitte refactoren".to_string()),
+                content: Some("@ironclaw /profile coding bitte refactoren".to_string()),
                 room_type: Some("direct".to_string()),
                 participant_count: None,
             }),
@@ -2111,7 +2092,9 @@ mod tests {
                 room_type: Some("direct".to_string()),
                 participant_count: None,
             }),
-            mention: None,
+            mention: Some(TalkMention {
+                user_id: Some("ironclaw".to_string()),
+            }),
             bridge_message: None,
         };
 

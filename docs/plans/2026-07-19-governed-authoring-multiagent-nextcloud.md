@@ -486,7 +486,7 @@ Dieser Abschnitt dokumentiert den tatsächlich umgesetzten Teil des Programms un
 
 - Phase 0 (Contract Freeze): in Arbeit
   - API-Flaechen fuer Identity/Memory/ToolPolicy/Delegation/Audit sind jetzt explizit als Host-Route-Contracts modelliert.
-  - Contract-Validierung erfolgt: `webui_v2_descriptors_contract` (3/3) und `webui_v2_handlers_contract` (105/105) gruen.
+  - Contract-Validierung erfolgt: `webui_v2_descriptors_contract` (3/3) und `webui_v2_handlers_contract` (118/118) gruen.
   - Verbleibend: Payload-Schema als eigenstaendige Domain-Types finalisieren (weg von reinem `serde_json::Value`).
 
 - Phase 1 (Authoring Domain modellieren): begonnen
@@ -563,3 +563,154 @@ Dieser Abschnitt dokumentiert den tatsächlich umgesetzten Teil des Programms un
   - `ironclaw_product_workflow`: ungenutzte Variable `onboarding_state` umbenennen/verwenden. (umgesetzt: verwendet)
   - `ironclaw_product_workflow`: ungenutzte Diagnosefunktionen aufraeumen oder unter Feature-Gates absichern. (umgesetzt: ungenutzte Helper entfernt)
 - Akzeptanzkriterium: Keine neuen `unused`/`dead_code`-Warnungen aus den genannten Crates in den Standard-Contract-Testlaeufen.
+
+## 13. Ausfuehrungsplan Zur Vollstaendigen Epic-Abnahme (2 Iterationen)
+
+**Stand:** 2026-07-21  
+**Ziel:** Alle Epics A-F auf Abnahme-Niveau bringen, inklusive Test- und Nachweisartefakten gemaess Endabnahme-Kriterien.
+
+### 13.1 Iteration 1 (Backend-Haertung + fehlende Kernpfade)
+
+**Prioritaet:** hoch  
+**Fokus-Epics:** B, C, D, E, F (A parallel nur Lueckenschluss, kein Redesign)
+
+#### Ticket I1-01: Policy Decision Point auf begruendete Entscheidungen erweitern (Epic D)
+
+- Scope:
+  - Decision-Result intern auf `allow|deny|escalate` mit reason_code erweitern.
+  - Einheitliche Antwort- und Audit-Semantik fuer Delegation, Tool-Execution und Channel-Egress.
+  - Fail-closed fuer unbekannte Rule- oder Resolution-Zustaende.
+- Dateien (erwartet):
+  - `crates/ironclaw_webui_v2/src/handlers.rs`
+  - ggf. Policy-/Domain-Helfer in `crates/ironclaw_webui_v2/src/`
+- Tests:
+  - Handler-Contract: erlaubt/verweigert/eskaliert je Pfad.
+  - Negativtests fuer ungueltige Rules und fehlende Aufloesung.
+- Done:
+  - Escalation ist technisch durchgaengig abbildbar und auditiert.
+  - Kein Policy-Pfad umgeht den zentralen Decision Point.
+
+#### Ticket I1-02: DelegationTask von Settings-Projektion auf Runtime-Lifecycle finalisieren (Epic C)
+
+- Scope:
+  - Lebenszyklus strikt erzwingen (`admit -> dispatch -> resolve|cancel`).
+  - Terminalzustand, Actor-Mismatch, Profil-Mismatch hart absichern.
+  - Delegation-Status als projektionsfaehige, stabile Wire-Form liefern.
+- Tests:
+  - Runtime-Unit-Tests fuer alle Transitionen.
+  - Handler-Contract fuer Allowed/Denied-Transitionen.
+- Done:
+  - Kein invalider Zustand via API erreichbar.
+  - Alle Uebergaenge sind deterministisch und reproduzierbar.
+
+#### Ticket I1-03: Profilauflosung zentralisieren und erzwungen verwenden (Epic B)
+
+- Scope:
+  - Ein Resolver-Pfad fuer Agenten-, Delegations- und Channel-Ausfuehrung.
+  - Fallback nur ueber `default`; fehlt `default`, kontrollierter Fehler.
+  - Keine direkte Modellnamennutzung im Ausfuehrungspfad.
+- Tests:
+  - Contract/Integration fuer vorhandenes Profil, Fallback, Fehlerfall.
+  - Nachweis: unterschiedliche Konversationen mit unterschiedlichen Profilen.
+- Done:
+  - Profilrouting ist der einzige Modellzugangspfad.
+
+#### Ticket I1-04: Nextcloud Talk Kernfluss absichern (Epic E)
+
+- Scope:
+  - Mention-Filter strikt; ohne Mention sofortiger ACK ohne LLM-Aufruf.
+  - Asynchroner Ingress stabilisieren (keine blockierenden Roundtrips).
+  - REST-Egress mit robuster Fehlerbehandlung und redigierten Logs.
+- Tests:
+  - API/Integration-Tests fuer Mention- und Nicht-Mention-Fall.
+  - Fehlerpfade bei Egress/Auth/Timeout.
+- Done:
+  - End-to-end Textfluss fuer den Fake-User-Kanal robust.
+
+#### Ticket I1-05: Audit-Revert auf verbleibende kritische Entitaeten erweitern (Epic F)
+
+- Scope:
+  - Diff/Revert faehigkeit fuer Agents, Model Profiles, Channel Config, Skills.
+  - Restore-Eignung analog zu bereits umgesetztem Identity/Memory/ToolPolicy-Muster.
+- Tests:
+  - Handler-Contract je Entitaet: before/after Snapshot + Revert.
+  - Mismatch-/Invalid-Audit-Target fail-closed.
+- Done:
+  - Kritische Konfigurationen sind durchgaengig revertierbar und diffbar.
+
+### 13.2 Iteration 2 (UI-Fertigstellung + Endabnahme)
+
+**Prioritaet:** hoch  
+**Fokus-Epics:** A, E, F + finaler Nachweis fuer B/C/D
+
+#### Ticket I2-01: Governed Authoring UI fuer Identity/Memory/Tool Policies fertigstellen (Epic A)
+
+- Scope:
+  - Vollstaendige Editor-Flows (create/update/version/revert) statt reiner Listenansicht.
+  - Konsistente Validierungsanzeigen und Fehlertexte.
+  - Such- und Filterlogik pro Entitaet.
+- Tests:
+  - Frontend-Unit-Tests fuer API-Adapter, Hooks und kritische Rendering-Pfade.
+  - Mindestens ein E2E-Flow pro Entitaet (edit + revert).
+- Done:
+  - Authoring laeuft ohne Workspace-Editor-Missbrauch durchgaengig ueber Settings-UI.
+
+#### Ticket I2-02: Audit-UX komplettieren (Epic F)
+
+- Scope:
+  - Vergleichsdarstellung fuer komplexe Snapshots verbessern (lesbare Diff-Bloecke).
+  - Restore-Dialog mit klarer Ziel- und Risikoanzeige.
+  - Erfolg/Fehler/inkonsistenter Zustand deutlich kennzeichnen.
+- Tests:
+  - UI-Tests fuer Diff-Aufruf, Restore-Erfolg, Restore-Fehler.
+- Done:
+  - Bedienbarer, sicherer Revert-Workflow fuer Betriebsnutzer.
+
+#### Ticket I2-03: Nextcloud-E2E auf Endabnahme bringen (Epic E)
+
+- Scope:
+  - Headed Playwright fuer sichtbaren User-Flow.
+  - Credentials aus `deployment/.env.e2e`.
+  - Lauf auf Entwicklungsmaschine, nicht nur in CT.
+- Tests/Nachweise:
+  - Artefakte je Schritt: Eingabe, Verarbeitung, Ausgabe.
+  - Nachweis fuer korrekte Publikation im Zielsystem.
+- Done:
+  - End-to-end Kanalfluss reproduzierbar und dokumentiert.
+
+#### Ticket I2-04: Endabnahmeblock 1-3 komplett nachweisen (Epic A-F)
+
+- Scope:
+  - Smoke- und E2E-Matrix fuer Ollama -> Ironclaw -> Channels.
+  - Release-Dokumentation mit Deployment-Reihenfolge, Ergebnissen, Restrisiken.
+- Done:
+  - Kriterien aus finaler Acceptance-Instruktion sind vollstaendig belegt.
+
+### 13.3 Verpflichtende Testmatrix Pro Iteration
+
+- Contract:
+  - `webui_v2_descriptors_contract`
+  - `webui_v2_handlers_contract`
+- Zielgerichtete Integration:
+  - Delegation-Lifecycle
+  - Profilresolver inklusive Fallback/Fehler
+  - Channel Mention-Filter + Egress
+- E2E/Playwright:
+  - Mindestens ein Vollfluss je sichtbarer Kernstrecke
+
+### 13.4 Reihenfolge fuer die Ausfuehrung (operativ)
+
+1. Iteration 1 Ticket I1-01 bis I1-05 in exakt dieser Reihenfolge abarbeiten.
+2. Nach jedem Ticket Contract-Tests laufen lassen und Ergebnisse dokumentieren.
+3. Erst bei gruenem Iteration-1-Stand mit Iteration 2 starten.
+4. Iteration 2 Ticket I2-01 bis I2-04 abarbeiten.
+5. Abschliessend Endabnahmebericht mit Evidenz pro Acceptance-Block erstellen.
+
+### 13.5 Epic-Abschlusskriterium (A-F)
+
+- Epic A: Authoring-UI vollstaendig produktiv nutzbar und versioniert.
+- Epic B: Profilrouting exklusiv und nachweisbar in allen Ausfuehrungspfaden.
+- Epic C: Delegation-Lifecycle stabil, sichtbar, auditierbar.
+- Epic D: Zentraler Policy-Decision-Point mit allow/deny/escalate wirksam.
+- Epic E: Nextcloud Talk Mention-zu-Reply-Fullflow robust und getestet.
+- Epic F: Diff/Revert fuer alle kritischen Entitaeten plus sichere Restore-UX.

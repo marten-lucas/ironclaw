@@ -7,9 +7,13 @@ import { SettingsSearchEmpty } from "./settings-search-empty";
 import { matchesSearch } from "../lib/settings-search";
 import { useAuditSettings } from "../hooks/useAuditSettings";
 import {
+  revertSettingsChannelConfig,
   fetchSettingsAuditDiff,
+  revertSettingsAgent,
   revertSettingsIdentity,
   revertSettingsMemory,
+  revertSettingsModelProfile,
+  revertSettingsSkill,
   revertSettingsToolPolicy,
 } from "../lib/settings-api";
 
@@ -18,6 +22,11 @@ const VALIDATION_WARNINGS = [
   "agent.default_profile_id must resolve to an existing model profile",
   "policy binding must exist for active agents",
 ];
+
+function formatJson(value) {
+  if (value === undefined) return "undefined";
+  return JSON.stringify(value, null, 2);
+}
 
 export function AuditTab({ searchQuery = "" }) {
   const t = useT();
@@ -100,6 +109,24 @@ export function AuditTab({ searchQuery = "" }) {
 
     const endpoint = String(diff.restore_validation.revert_endpoint || "");
     const segments = endpoint.split("/").filter(Boolean);
+    const targetLabel = `${diff.entity_type}/${diff.entity_id}`;
+
+    const confirmed = window.confirm(
+      [
+        `Restore ${targetLabel}?`,
+        "",
+        "This will overwrite current settings with the recorded before_snapshot.",
+        `Endpoint: ${endpoint || "(not provided)"}`,
+      ].join("\n")
+    );
+
+    if (!confirmed) {
+      setRestoreState((state) => ({
+        ...state,
+        [auditId]: { isLoading: false, error: "", success: false },
+      }));
+      return;
+    }
 
     try {
       if (segments[4] === "identity" && segments[6] === "revert") {
@@ -108,6 +135,14 @@ export function AuditTab({ searchQuery = "" }) {
         await revertSettingsMemory(decodeURIComponent(segments[5]), auditId);
       } else if (segments[4] === "tool-policies" && segments[6] === "revert") {
         await revertSettingsToolPolicy(decodeURIComponent(segments[5]), auditId);
+      } else if (segments[4] === "model-profiles" && segments[6] === "revert") {
+        await revertSettingsModelProfile(decodeURIComponent(segments[5]), auditId);
+      } else if (segments[4] === "agents" && segments[6] === "revert") {
+        await revertSettingsAgent(decodeURIComponent(segments[5]), auditId);
+      } else if (segments[4] === "channel-config" && segments[6] === "revert") {
+        await revertSettingsChannelConfig(decodeURIComponent(segments[5]), auditId);
+      } else if (segments[4] === "skills" && segments[6] === "revert") {
+        await revertSettingsSkill(decodeURIComponent(segments[5]), auditId);
       } else {
         throw new Error(t("audit.restoreUnsupported"));
       }
@@ -254,6 +289,21 @@ export function AuditTab({ searchQuery = "" }) {
                         </p>
                       ) : (
                         <div className="space-y-2">
+                          <div className="rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-2 text-xs text-[var(--v2-text-muted)]">
+                            <div>
+                              <span className="font-semibold text-[var(--v2-text-strong)]">Restore Target:</span>{" "}
+                              {diffState[entry.audit_id]?.data?.entity_type}/{diffState[entry.audit_id]?.data?.entity_id}
+                            </div>
+                            <div className="mt-1">
+                              <span className="font-semibold text-[var(--v2-text-strong)]">Restore Endpoint:</span>{" "}
+                              {diffState[entry.audit_id]?.data?.restore_validation?.revert_endpoint || "-"}
+                            </div>
+                            <div className="mt-1">
+                              <span className="font-semibold text-[var(--v2-text-strong)]">Risk:</span>{" "}
+                              Restoring applies the historical snapshot and replaces current values.
+                            </div>
+                          </div>
+
                           {(diffState[entry.audit_id]?.data?.diff || []).length === 0 ? (
                             <p className="text-xs text-[var(--v2-text-muted)]">{t("audit.diffEmpty")}</p>
                           ) : (
@@ -268,10 +318,10 @@ export function AuditTab({ searchQuery = "" }) {
                                 <div className="text-xs text-[var(--v2-text-muted)]">{delta.change}</div>
                                 <div className="mt-1 grid gap-1 sm:grid-cols-2">
                                   <pre className="overflow-x-auto rounded bg-[var(--v2-canvas)] p-2 text-[10px] text-[var(--v2-text-muted)]">
-                                    {JSON.stringify(delta.before, null, 2)}
+                                    {`before\n${formatJson(delta.before)}`}
                                   </pre>
                                   <pre className="overflow-x-auto rounded bg-[var(--v2-canvas)] p-2 text-[10px] text-[var(--v2-text-muted)]">
-                                    {JSON.stringify(delta.after, null, 2)}
+                                    {`after\n${formatJson(delta.after)}`}
                                   </pre>
                                 </div>
                               </div>

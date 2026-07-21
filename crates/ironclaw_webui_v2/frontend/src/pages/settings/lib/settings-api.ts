@@ -3,6 +3,9 @@ import { apiFetch } from "../../../lib/api";
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
 const SETTINGS_MODEL_PROFILES_BASE = "/api/webchat/v2/settings/model-profiles";
+const SETTINGS_IDENTITY_BASE = "/api/webchat/v2/settings/identity";
+const SETTINGS_MEMORY_BASE = "/api/webchat/v2/settings/memory";
+const SETTINGS_TOOL_POLICIES_BASE = "/api/webchat/v2/settings/tool-policies";
 const SETTINGS_AGENTS_BASE = "/api/webchat/v2/settings/agents";
 const SETTINGS_DELEGATIONS_BASE = "/api/webchat/v2/settings/delegations";
 const SETTINGS_AUDIT_BASE = "/api/webchat/v2/settings/audit";
@@ -175,6 +178,39 @@ export function fetchSettingsModelProfiles() {
   return apiFetch(SETTINGS_MODEL_PROFILES_BASE);
 }
 
+export function fetchSettingsIdentity() {
+  return apiFetch(SETTINGS_IDENTITY_BASE);
+}
+
+export function upsertSettingsIdentity(identityId, payload) {
+  return apiFetch(`${SETTINGS_IDENTITY_BASE}/${encodeURIComponent(identityId)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchSettingsMemory() {
+  return apiFetch(SETTINGS_MEMORY_BASE);
+}
+
+export function upsertSettingsMemory(memoryId, payload) {
+  return apiFetch(`${SETTINGS_MEMORY_BASE}/${encodeURIComponent(memoryId)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchSettingsToolPolicies() {
+  return apiFetch(SETTINGS_TOOL_POLICIES_BASE);
+}
+
+export function upsertSettingsToolPolicy(policyId, payload) {
+  return apiFetch(`${SETTINGS_TOOL_POLICIES_BASE}/${encodeURIComponent(policyId)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function upsertSettingsModelProfile(profileId, payload) {
   return apiFetch(`${SETTINGS_MODEL_PROFILES_BASE}/${encodeURIComponent(profileId)}`, {
     method: "POST",
@@ -227,6 +263,40 @@ export function revertSettingsToolPolicy(policyId, auditId) {
       body: JSON.stringify({ audit_id: auditId }),
     }
   );
+}
+
+export function revertSettingsModelProfile(profileId, auditId) {
+  return apiFetch(
+    `/api/webchat/v2/settings/model-profiles/${encodeURIComponent(profileId)}/revert`,
+    {
+      method: "POST",
+      body: JSON.stringify({ audit_id: auditId }),
+    }
+  );
+}
+
+export function revertSettingsAgent(agentId, auditId) {
+  return apiFetch(`/api/webchat/v2/settings/agents/${encodeURIComponent(agentId)}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ audit_id: auditId }),
+  });
+}
+
+export function revertSettingsChannelConfig(configId, auditId) {
+  return apiFetch(
+    `/api/webchat/v2/settings/channel-config/${encodeURIComponent(configId)}/revert`,
+    {
+      method: "POST",
+      body: JSON.stringify({ audit_id: auditId }),
+    }
+  );
+}
+
+export function revertSettingsSkill(skillId, auditId) {
+  return apiFetch(`/api/webchat/v2/settings/skills/${encodeURIComponent(skillId)}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ audit_id: auditId }),
+  });
 }
 
 export function fetchExtensions() {
