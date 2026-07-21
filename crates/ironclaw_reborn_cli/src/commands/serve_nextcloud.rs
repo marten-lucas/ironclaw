@@ -8,6 +8,14 @@ const DEFAULT_EXTENSION_ID: &str = "nextcloud-talk";
 const DEFAULT_WEBHOOK_PATH: &str = "/webhooks/nextcloud/talk";
 const DEFAULT_BOT_NAME: &str = "ironclaw";
 
+fn default_model_profiles() -> std::collections::BTreeMap<String, String> {
+    let mut model_profiles = std::collections::BTreeMap::new();
+    model_profiles.insert("default".to_string(), "qwen-3.6-9b".to_string());
+    model_profiles.insert("coding".to_string(), "qwen2.5-coder".to_string());
+    model_profiles.insert("vision".to_string(), "llava".to_string());
+    model_profiles
+}
+
 pub(crate) fn resolve_nextcloud_talk_config_for_serve(
     nextcloud_section: Option<&NextcloudTalkSection>,
     tenant_id: &TenantId,
@@ -44,7 +52,7 @@ pub(crate) fn resolve_nextcloud_talk_config_for_serve(
         .to_string();
     let model_profiles = nextcloud_section
         .map(|section| section.model_profiles.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(default_model_profiles);
     // Outbound host is resolved from extension setup credentials
     // (`nextcloud_talk_base_url`) at runtime.
     let nextcloud_host = None;
@@ -162,5 +170,32 @@ mod tests {
         .expect("route config");
 
         assert!(config.is_none(), "disabled nextcloud section must not mount route");
+    }
+
+    #[test]
+    fn resolve_uses_default_model_profiles_when_nextcloud_section_is_missing() {
+        let config = resolve_nextcloud_talk_config_for_serve(
+            None,
+            &tenant_id(),
+            &agent_id(),
+            None,
+            &user_id(),
+            Path::new("/tmp/ironclaw.toml"),
+        )
+        .expect("route config")
+        .expect("nextcloud config");
+
+        assert_eq!(
+            config.model_profiles.get("default").map(String::as_str),
+            Some("qwen-3.6-9b")
+        );
+        assert_eq!(
+            config.model_profiles.get("coding").map(String::as_str),
+            Some("qwen2.5-coder")
+        );
+        assert_eq!(
+            config.model_profiles.get("vision").map(String::as_str),
+            Some("llava")
+        );
     }
 }
