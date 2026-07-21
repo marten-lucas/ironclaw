@@ -629,8 +629,12 @@ async fn nextcloud_talk_handler(
         }
     };
 
-    if let Err(error) = validate_declared_reply_user(&state, &event).await {
-        return (StatusCode::BAD_REQUEST, Json(NextcloudErrorBody { error })).into_response();
+    match validate_declared_reply_user(&state, &event).await {
+        Ok(DeclaredReplyUserValidation::Process) => {}
+        Ok(DeclaredReplyUserValidation::Ignore) => return (StatusCode::OK, "ok").into_response(),
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(NextcloudErrorBody { error })).into_response();
+        }
     }
 
     let resolved_bot_name = match resolve_nextcloud_bot_display_name(&state).await {
@@ -1171,9 +1175,9 @@ fn preview_body_for_log(body: &[u8], max_chars: usize) -> String {
 async fn validate_declared_reply_user(
     state: &NextcloudTalkRouteState,
     event: &TalkEvent,
-) -> Result<(), &'static str> {
+) -> Result<DeclaredReplyUserValidation, &'static str> {
     let Some(declared_reply_user) = extract_declared_reply_user_id(event) else {
-        return Ok(());
+        return Ok(DeclaredReplyUserValidation::Process);
     };
 
     let configured_reply_user = resolve_nextcloud_bot_username(state)
@@ -1181,11 +1185,27 @@ async fn validate_declared_reply_user(
         .map_err(|_| "reply_user_config_unavailable")?
         .ok_or("reply_user_config_missing")?;
 
-    if normalized_user_id_matches(&declared_reply_user, &configured_reply_user) {
-        return Ok(());
-    }
+    Ok(classify_declared_reply_user(
+        &declared_reply_user,
+        &configured_reply_user,
+    ))
+}
 
-    Err("reply_user_mismatch")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclaredReplyUserValidation {
+    Process,
+    Ignore,
+}
+
+fn classify_declared_reply_user(
+    declared_reply_user: &str,
+    configured_reply_user: &str,
+) -> DeclaredReplyUserValidation {
+    if normalized_user_id_matches(declared_reply_user, configured_reply_user) {
+        DeclaredReplyUserValidation::Process
+    } else {
+        DeclaredReplyUserValidation::Ignore
+    }
 }
 
 fn extract_declared_reply_user_id(event: &TalkEvent) -> Option<String> {
@@ -2312,5 +2332,21 @@ mod tests {
     fn normalized_user_id_matches_ignores_case_and_prefix_at() {
         assert!(normalized_user_id_matches("@KI_Assistent", "ki_assistent"));
         assert!(!normalized_user_id_matches("ki_assistent", "andere_id"));
+    }
+
+    #[test]
+    fn classify_declared_reply_user_processes_matching_user() {
+        assert_eq!(
+            classify_declared_reply_user("@ki_assistent", "ki_assistent"),
+            DeclaredReplyUserValidation::Process
+        );
+    }
+
+    #[test]
+    fn classify_declared_reply_user_ignores_mismatched_user() {
+        assert_eq!(
+            classify_declared_reply_user("@fremder_bot", "ki_assistent"),
+            DeclaredReplyUserValidation::Ignore
+        );
     }
 }

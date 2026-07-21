@@ -81,6 +81,10 @@ use crate::governed_authoring::{
     SETTINGS_IDENTITY_CONFIG_PREFIX, SETTINGS_MEMORY_CONFIG_PREFIX,
     SETTINGS_TOOL_POLICY_CONFIG_PREFIX, ToolPolicy, ToolPolicyScope,
 };
+#[cfg(test)]
+use crate::governed_authoring::DelegationStatus;
+#[cfg(test)]
+use ironclaw_product_workflow::RebornOperatorConfigEntry;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
 use crate::schema::WebChatV2EventFrame;
 use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
@@ -1916,6 +1920,16 @@ enum SettingsPolicyDecision {
     Escalate,
 }
 
+impl SettingsPolicyDecision {
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::Allow => "policy_allow",
+            Self::Deny => "policy_deny",
+            Self::Escalate => "policy_escalate",
+        }
+    }
+}
+
 impl SettingsPolicyAction {
     fn as_rule_key(self) -> &'static str {
         match self {
@@ -2776,6 +2790,17 @@ pub async fn upsert_settings_agent(
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_config_entity_id("agent_id", &agent_id, SETTINGS_AGENT_ID_MAX_BYTES)?;
     validate_settings_agent_payload(&body)?;
+    let resolved_default_profile_id = resolve_settings_model_profile_id(
+        &state,
+        &caller,
+        SettingsModelProfileResolutionRequest {
+            requested_profile_id: &body.default_profile_id,
+            explicit_resolved_profile_id: None,
+            requested_field: "default_profile_id",
+            resolved_field: "resolved_model_profile_id",
+        },
+    )
+    .await?;
     let key = validate_operator_config_key(governed_authoring::config_key(
         GovernedAuthoringKind::Agent,
         &agent_id,
@@ -2785,7 +2810,7 @@ pub async fn upsert_settings_agent(
         id: agent_id,
         display_name: body.display_name,
         role: body.role,
-        default_profile_id: body.default_profile_id,
+        default_profile_id: resolved_default_profile_id,
         policy_binding_id: body.policy_binding_id,
         status: body.status,
     };
@@ -3034,8 +3059,12 @@ pub async fn upsert_settings_delegation(
     let resolved_model_profile_id = resolve_settings_model_profile_id(
         &state,
         &caller,
-        &body.requested_profile_id,
-        body.resolved_model_profile_id.as_deref(),
+        SettingsModelProfileResolutionRequest {
+            requested_profile_id: &body.requested_profile_id,
+            explicit_resolved_profile_id: body.resolved_model_profile_id.as_deref(),
+            requested_field: "requested_profile_id",
+            resolved_field: "resolved_model_profile_id",
+        },
     )
     .await?;
 
@@ -4101,21 +4130,34 @@ fn validate_settings_agent_payload(body: &SettingsAgentUpsertRequest) -> Result<
     Ok(())
 }
 
+struct SettingsModelProfileResolutionRequest<'a> {
+    requested_profile_id: &'a str,
+    explicit_resolved_profile_id: Option<&'a str>,
+    requested_field: &'static str,
+    resolved_field: &'static str,
+}
+
 async fn resolve_settings_model_profile_id(
     state: &WebUiV2State,
     caller: &WebUiAuthenticatedCaller,
-    requested_profile_id: &str,
-    explicit_resolved_profile_id: Option<&str>,
+    request: SettingsModelProfileResolutionRequest<'_>,
 ) -> Result<String, WebUiV2HttpError> {
     let response = state.services().list_operator_config(caller.clone()).await?;
+    resolve_settings_model_profile_id_from_entries(&response, request)
+}
+
+fn resolve_settings_model_profile_id_from_entries(
+    response: &RebornOperatorConfigListResponse,
+    request: SettingsModelProfileResolutionRequest<'_>,
+) -> Result<String, WebUiV2HttpError> {
     let has_model_profile = |profile_id: &str| {
         let key = format!("{SETTINGS_MODEL_PROFILE_CONFIG_PREFIX}{profile_id}");
         response.entries.iter().any(|entry| entry.key == key)
     };
 
-    if let Some(explicit) = explicit_resolved_profile_id {
+    if let Some(explicit) = request.explicit_resolved_profile_id {
         validate_settings_config_entity_id(
-            "resolved_model_profile_id",
+            request.resolved_field,
             explicit,
             SETTINGS_MODEL_PROFILE_ID_MAX_BYTES,
         )?;
@@ -4126,20 +4168,20 @@ async fn resolve_settings_model_profile_id(
             return Ok("default".to_string());
         }
         return Err(bad_request_with(
-            "resolved_model_profile_id",
+            request.resolved_field,
             WebUiInboundValidationCode::InvalidValue,
         ));
     }
 
-    if has_model_profile(requested_profile_id) {
-        return Ok(requested_profile_id.to_string());
+    if has_model_profile(request.requested_profile_id) {
+        return Ok(request.requested_profile_id.to_string());
     }
     if has_model_profile("default") {
         return Ok("default".to_string());
     }
 
     Err(bad_request_with(
-        "requested_profile_id",
+        request.requested_field,
         WebUiInboundValidationCode::InvalidValue,
     ))
 }
@@ -4339,6 +4381,9 @@ fn map_delegation_runtime_error(
         DelegationRuntimeErrorCode::TerminalState => {
             bad_request_with("task_id", WebUiInboundValidationCode::InvalidValue)
         }
+        DelegationRuntimeErrorCode::ResolvedProfileMismatch => {
+            bad_request_with("resolved_model_profile_id", WebUiInboundValidationCode::InvalidValue)
+        }
     }
 }
 
@@ -4351,6 +4396,12 @@ async fn require_settings_policy_decision(
     let action_key = action.as_rule_key();
 
     let decision = evaluate_settings_policy_decision(&response, action_key);
+    tracing::debug!(
+        action = action_key,
+        reason_code = decision.reason_code(),
+        decision = ?decision,
+        "evaluated settings policy decision"
+    );
 
     match decision {
         SettingsPolicyDecision::Allow => Ok(()),
@@ -4517,6 +4568,17 @@ fn policy_rule_matches_action(rule: &str, action_key: &str) -> bool {
         || (rule == "delegation.*" && action_key.starts_with("delegation."))
         || (rule == "tool.*" && action_key.starts_with("tool."))
         || (rule == "channel.*" && action_key.starts_with("channel."))
+}
+
+#[cfg(test)]
+fn settings_policy_response(
+    entries: Vec<RebornOperatorConfigEntry>,
+) -> RebornOperatorConfigListResponse {
+    RebornOperatorConfigListResponse {
+        entries,
+        precedence: Vec::new(),
+        diagnostics: Vec::new(),
+    }
 }
 pub async fn get_operator_config_key(
     State(state): State<WebUiV2State>,
@@ -5197,6 +5259,42 @@ async fn ws_send_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_entry(key: &str, value: serde_json::Value) -> RebornOperatorConfigEntry {
+        RebornOperatorConfigEntry {
+            key: key.to_string(),
+            value,
+            source: "test".to_string(),
+            redacted: false,
+            mutable: true,
+        }
+    }
+
+    #[test]
+    fn settings_policy_decision_reason_codes_are_stable() {
+        assert_eq!(SettingsPolicyDecision::Allow.reason_code(), "policy_allow");
+        assert_eq!(SettingsPolicyDecision::Deny.reason_code(), "policy_deny");
+        assert_eq!(SettingsPolicyDecision::Escalate.reason_code(), "policy_escalate");
+    }
+
+    #[test]
+    fn deny_rules_override_escalation_rules() {
+        let response = settings_policy_response(vec![
+            policy_entry(
+                "tool_policy.global",
+                serde_json::json!({
+                    "scope": "global",
+                    "deny_rules": ["tool.execution"],
+                    "escalation_rules": ["tool.execution"]
+                }),
+            ),
+        ]);
+
+        assert_eq!(
+            evaluate_settings_policy_decision(&response, "tool.execution"),
+            SettingsPolicyDecision::Deny
+        );
+    }
 
     #[test]
     fn sse_poll_interval_backs_off_only_after_repeated_idle_drains() {

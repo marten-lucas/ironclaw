@@ -35,6 +35,7 @@ pub enum DelegationRuntimeErrorCode {
     TerminalState,
     ActorMismatch,
     InvalidResolvedProfile,
+    ResolvedProfileMismatch,
 }
 
 #[derive(Debug, Clone)]
@@ -110,13 +111,20 @@ pub fn transition_delegation_task(
             DelegationRuntimeErrorCode::InvalidResolvedProfile,
         )?;
 
+        if let Some(candidate) = resolved_override.as_deref() {
+            if candidate != existing.resolved_model_profile_id {
+                return Err(DelegationRuntimeError::new(
+                    DelegationRuntimeErrorCode::ResolvedProfileMismatch,
+                ));
+            }
+        }
+
         return Ok(DelegationTask {
             id: existing.id,
             source_agent_id: existing.source_agent_id,
             target_agent_id: existing.target_agent_id,
             requested_profile_id: existing.requested_profile_id,
-            resolved_model_profile_id: resolved_override
-                .unwrap_or(existing.resolved_model_profile_id),
+            resolved_model_profile_id: existing.resolved_model_profile_id,
             status: next_status,
             policy_context: input.policy_context.or(existing.policy_context),
             prompt: input.prompt.or(existing.prompt),
@@ -278,5 +286,14 @@ mod tests {
         let err = transition_delegation_task(Some(task(DelegationStatus::Admitted)), bad)
             .expect_err("blank resolved profile override must fail closed");
         assert_eq!(err.code, DelegationRuntimeErrorCode::InvalidResolvedProfile);
+    }
+
+    #[test]
+    fn resolved_profile_mismatch_is_rejected_for_existing_task() {
+        let mut bad = input(DelegationRuntimeAction::Dispatch);
+        bad.resolved_model_profile_id = Some("coding".to_string());
+        let err = transition_delegation_task(Some(task(DelegationStatus::Admitted)), bad)
+            .expect_err("resolved profile drift must fail closed");
+        assert_eq!(err.code, DelegationRuntimeErrorCode::ResolvedProfileMismatch);
     }
 }

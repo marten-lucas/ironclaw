@@ -3352,6 +3352,53 @@ async fn revert_channel_config_uses_audit_before_snapshot() {
 }
 
 #[tokio::test]
+async fn revert_channel_config_rejects_mismatched_audit_target() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "channel_config",
+                "entity_id": "other_config",
+                "action": "upsert",
+                "before_snapshot": {
+                    "final_reply_target_id": "slack-dm-zeta"
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/channel-config/outbound_preferences/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .set_outbound_preferences_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid channel-config revert target must fail closed before write"
+    );
+}
+
+#[tokio::test]
 async fn revert_skill_auto_activate_learned_uses_audit_before_snapshot() {
     let services = Arc::new(StubServices::default());
     services
@@ -3410,6 +3457,54 @@ async fn revert_skill_auto_activate_learned_uses_audit_before_snapshot() {
                 && value["action"] == "revert"
         }),
         "skill revert must emit audit"
+    );
+}
+
+#[tokio::test]
+async fn revert_skill_rejects_mismatched_audit_target() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "skill",
+                "entity_id": "other_skill",
+                "action": "upsert",
+                "before_snapshot": {
+                    "kind": "auto_activate_learned",
+                    "enabled": true
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/skills/auto_activate_learned/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .set_auto_activate_learned_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid skill revert target must fail closed before write"
     );
 }
 
@@ -3642,6 +3737,54 @@ async fn revert_model_profile_uses_audit_before_snapshot() {
 }
 
 #[tokio::test]
+async fn revert_model_profile_rejects_mismatched_audit_target() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "model_profile",
+                "entity_id": "coding",
+                "action": "upsert",
+                "before_snapshot": {
+                    "model": "qwen3:14b",
+                    "temperature": "0.1"
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/model-profiles/default/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid model-profile revert target must fail closed before write"
+    );
+}
+
+#[tokio::test]
 async fn upsert_identity_writes_before_after_audit_snapshot() {
     let services = Arc::new(StubServices::default());
     services
@@ -3741,16 +3884,22 @@ async fn upsert_agent_writes_before_after_audit_snapshot() {
         .operator_config_entries
         .lock()
         .expect("lock")
-        .push(operator_config_entry(
-            "agent.roster.ceo".to_string(),
-            serde_json::json!({
-                "display_name": "CEO",
-                "role": "orchestrator",
-                "default_profile_id": "default",
-                "policy_binding_id": "policy/global-safe",
-                "status": "active"
-            }),
-        ));
+        .extend([
+            operator_config_entry(
+                "model_profile.default".to_string(),
+                serde_json::json!({ "model": "qwen3:32b", "temperature": "0.2" }),
+            ),
+            operator_config_entry(
+                "agent.roster.ceo".to_string(),
+                serde_json::json!({
+                    "display_name": "CEO",
+                    "role": "orchestrator",
+                    "default_profile_id": "default",
+                    "policy_binding_id": "policy/global-safe",
+                    "status": "active"
+                }),
+            ),
+        ]);
     let router = router_with(services.clone());
 
     let response = router
@@ -3790,6 +3939,80 @@ async fn upsert_agent_writes_before_after_audit_snapshot() {
                 && value["after_snapshot"]["status"] == serde_json::json!("paused")
         }),
         "agent upsert must emit audit snapshot pair"
+    );
+}
+
+#[tokio::test]
+async fn upsert_agent_falls_back_to_default_profile_when_requested_missing() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "model_profile.default".to_string(),
+            serde_json::json!({ "model": "qwen3:32b", "temperature": "0.2" }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/agents/ceo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"display_name":"CEO","role":"orchestrator","default_profile_id":"coding","policy_binding_id":"policy/global-safe","status":"active"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    let write = calls
+        .iter()
+        .find(|(key, _)| key == "agent.roster.ceo")
+        .expect("agent write");
+    assert_eq!(write.1["default_profile_id"], serde_json::json!("default"));
+}
+
+#[tokio::test]
+async fn upsert_agent_rejects_when_no_profile_is_resolvable() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/agents/ceo")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"display_name":"CEO","role":"orchestrator","default_profile_id":"coding","policy_binding_id":"policy/global-safe","status":"active"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "default_profile_id");
+    assert_eq!(body["validation_code"], "invalid_value");
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "agent write must fail closed when no profile is resolvable"
     );
 }
 
@@ -3866,6 +4089,57 @@ async fn revert_agent_uses_audit_before_snapshot() {
                 && value["action"] == "revert"
         }),
         "agent revert must emit audit"
+    );
+}
+
+#[tokio::test]
+async fn revert_agent_rejects_mismatched_audit_target() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "agent",
+                "entity_id": "other-agent",
+                "action": "upsert",
+                "before_snapshot": {
+                    "display_name": "CEO",
+                    "role": "orchestrator",
+                    "default_profile_id": "default",
+                    "policy_binding_id": "policy/global-safe",
+                    "status": "active"
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/agents/ceo/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid agent revert target must fail closed before write"
     );
 }
 
@@ -5398,7 +5672,7 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
 
     assert_eq!(
         *services.list_operator_config_calls.lock().expect("lock"),
-        26
+        27
     );
     let set_calls = services
         .set_operator_config_key_calls
@@ -5555,6 +5829,67 @@ async fn upsert_settings_delegation_rejects_when_no_profile_is_resolvable() {
             .expect("lock")
             .is_empty(),
         "delegation write must fail closed when no profile is resolvable"
+    );
+}
+
+#[tokio::test]
+async fn upsert_settings_delegation_rejects_resolved_profile_drift_for_existing_task() {
+    let services = Arc::new(StubServices::default());
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .extend([
+            operator_config_entry(
+                "model_profile.default".to_string(),
+                serde_json::json!({ "model": "qwen3:32b", "temperature": "0.2" }),
+            ),
+            operator_config_entry(
+                "model_profile.coding".to_string(),
+                serde_json::json!({ "model": "qwen3-coder:32b", "temperature": "0.1" }),
+            ),
+            operator_config_entry(
+                "delegation.task-1".to_string(),
+                serde_json::json!({
+                    "source_agent_id":"ceo",
+                    "target_agent_id":"coder",
+                    "requested_profile_id":"coding",
+                    "resolved_model_profile_id":"default",
+                    "status":"admitted",
+                    "policy_context":null,
+                    "prompt":null,
+                    "transition_count":1
+                }),
+            ),
+        ]);
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/delegations/task-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"source_agent_id":"ceo","target_agent_id":"coder","requested_profile_id":"coding","action":"dispatch"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "resolved_model_profile_id");
+    assert_eq!(body["validation_code"], "invalid_value");
+    assert!(
+        services
+            .set_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "delegation lifecycle must fail closed on resolved profile drift"
     );
 }
 

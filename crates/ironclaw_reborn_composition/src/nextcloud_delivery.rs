@@ -229,8 +229,7 @@ impl NextcloudTalkFinalReplyDriver {
         let http_status_class = http_status / 100;
         if !(200..300).contains(&http_status) {
             let retry_decision = nextcloud_retry_decision(http_status).to_string();
-            let detail = nextcloud_ocs_error_detail(response.body())
-                .unwrap_or_else(|| body_excerpt_bytes(response.body()));
+            let detail = nextcloud_error_detail(response.body());
 
             tracing::warn!(
                 target = "ironclaw::reborn::nextcloud_delivery",
@@ -420,17 +419,11 @@ fn nextcloud_ocs_error_detail(body: &[u8]) -> Option<String> {
     ))
 }
 
-fn body_excerpt_bytes(body: &[u8]) -> String {
-    let text = String::from_utf8_lossy(body);
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        return "<empty body>".to_string();
+fn nextcloud_error_detail(body: &[u8]) -> String {
+    if let Some(detail) = nextcloud_ocs_error_detail(body) {
+        return detail;
     }
-    if compact.len() > 180 {
-        format!("{}...", &compact[..180])
-    } else {
-        compact
-    }
+    format!("non_ocs_error_body_bytes={}", body.len())
 }
 
 /// A `NextcloudEgressCredentialProvider` that resolves credentials from the
@@ -560,7 +553,7 @@ mod tests {
     use ironclaw_product_adapters::ExternalConversationRef;
 
     use super::{
-        body_excerpt_bytes, nextcloud_ocs_error_detail, nextcloud_retry_decision,
+        nextcloud_error_detail, nextcloud_ocs_error_detail, nextcloud_retry_decision,
         reply_to_message_id,
     };
 
@@ -609,10 +602,11 @@ mod tests {
     }
 
     #[test]
-    fn body_excerpt_handles_empty_and_long_bodies() {
-        assert_eq!(body_excerpt_bytes(b""), "<empty body>");
-        let long = "a".repeat(260);
-        let excerpt = body_excerpt_bytes(long.as_bytes());
-        assert!(excerpt.ends_with("..."));
+    fn nextcloud_error_detail_falls_back_to_redacted_length_only() {
+        assert_eq!(nextcloud_error_detail(b""), "non_ocs_error_body_bytes=0");
+        assert_eq!(
+            nextcloud_error_detail(br#"{"error":"raw backend detail"}"#),
+            "non_ocs_error_body_bytes=30"
+        );
     }
 }
