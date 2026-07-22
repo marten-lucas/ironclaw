@@ -1,7 +1,8 @@
 // @ts-nocheck
+import React from "react";
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { fetchSettingsDelegations } from "../lib/settings-api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchSettingsDelegations, upsertSettingsDelegation } from "../lib/settings-api";
 
 function delegationFromEntry(entry) {
   if (!entry?.key?.startsWith("delegation.")) return null;
@@ -18,6 +19,7 @@ function delegationFromEntry(entry) {
 }
 
 export function useDelegationsSettings() {
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["settings-delegations"],
     queryFn: fetchSettingsDelegations,
@@ -28,5 +30,33 @@ export function useDelegationsSettings() {
     [query.data]
   );
 
-  return { delegations, query };
+  const mutation = useMutation({
+    mutationFn: ({ taskId, payload }) => upsertSettingsDelegation(taskId, payload),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["settings-delegations"], (old) => {
+        const currentEntries = old?.entries || [];
+        const entry = data?.entry;
+        if (!entry?.key) return old;
+        const withoutUpdated = currentEntries.filter((item) => item.key !== entry.key);
+        return {
+          ...(old || {}),
+          entries: [...withoutUpdated, entry],
+        };
+      });
+    },
+  });
+
+  const saveDelegation = React.useCallback(
+    (taskId, payload) => mutation.mutate({ taskId, payload }),
+    [mutation]
+  );
+
+  return {
+    delegations,
+    query,
+    saveDelegation,
+    isSaving: mutation.isPending,
+    savingTaskId: mutation.variables?.taskId,
+    error: mutation.error,
+  };
 }

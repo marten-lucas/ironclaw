@@ -233,6 +233,13 @@ export function fetchSettingsDelegations() {
   return apiFetch(SETTINGS_DELEGATIONS_BASE);
 }
 
+export function upsertSettingsDelegation(taskId, payload) {
+  return apiFetch(`${SETTINGS_DELEGATIONS_BASE}/${encodeURIComponent(taskId)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchSettingsAudit() {
   return apiFetch(SETTINGS_AUDIT_BASE);
 }

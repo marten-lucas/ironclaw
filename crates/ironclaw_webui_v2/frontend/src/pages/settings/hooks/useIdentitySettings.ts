@@ -1,7 +1,12 @@
 // @ts-nocheck
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchSettingsIdentity, upsertSettingsIdentity } from "../lib/settings-api";
+import {
+  fetchSettingsAudit,
+  fetchSettingsIdentity,
+  revertSettingsIdentity,
+  upsertSettingsIdentity,
+} from "../lib/settings-api";
 
 function identityFromEntry(entry) {
   if (!entry?.key?.startsWith("identity.")) return null;
@@ -45,6 +50,46 @@ export function useIdentitySettings() {
           entries: [...withoutUpdated, entry],
         };
       });
+      queryClient.invalidateQueries({ queryKey: ["settings-audit"] });
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: async (identityId) => {
+      const audit = await fetchSettingsAudit();
+      const entries = Array.isArray(audit?.entries) ? audit.entries : [];
+      const candidates = entries
+        .filter((entry) => entry?.key?.startsWith("audit."))
+        .map((entry) => {
+          const value = entry?.value || {};
+          const auditId = String(value.id || entry.key.slice("audit.".length));
+          return {
+            auditId,
+            entityType: String(value.entity_type || ""),
+            entityId: String(value.entity_id || ""),
+            beforeSnapshot: value.before_snapshot,
+            createdAt: String(value.created_at || ""),
+          };
+        })
+        .filter((entry) =>
+          entry.entityType === "identity"
+          && entry.entityId === identityId
+          && entry.beforeSnapshot != null
+          && entry.auditId
+        )
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+      const latest = candidates[0];
+      if (!latest) {
+        throw new Error("No eligible audit snapshot found for this identity.");
+      }
+
+      await revertSettingsIdentity(identityId, latest.auditId);
+      return { identityId, auditId: latest.auditId };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings-identity"] });
+      queryClient.invalidateQueries({ queryKey: ["settings-audit"] });
     },
   });
 
@@ -60,5 +105,11 @@ export function useIdentitySettings() {
     isSaving: mutation.isPending,
     savingIdentityId: mutation.variables?.identityId,
     error: mutation.error,
+    restoreIdentity: (identityId) => restoreMutation.mutate(identityId),
+    isRestoring: restoreMutation.isPending,
+    restoringIdentityId: restoreMutation.variables,
+    restoreError: restoreMutation.error,
+    restoredIdentityId: restoreMutation.data?.identityId,
+    restoredAuditId: restoreMutation.data?.auditId,
   };
 }

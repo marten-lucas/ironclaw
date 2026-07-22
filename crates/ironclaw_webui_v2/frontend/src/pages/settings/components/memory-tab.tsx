@@ -24,7 +24,19 @@ function parseVersion(value) {
 
 export function MemoryTab({ searchQuery = "" }) {
   const t = useT();
-  const { memories, query, saveMemory, isSaving, savingMemoryId } = useMemorySettings();
+  const {
+    memories,
+    query,
+    saveMemory,
+    isSaving,
+    savingMemoryId,
+    restoreMemory,
+    isRestoring,
+    restoringMemoryId,
+    restoreError,
+    restoredMemoryId,
+    restoredAuditId,
+  } = useMemorySettings();
   const [drafts, setDrafts] = React.useState({});
   const [createDraft, setCreateDraft] = React.useState({
     memory_id: "",
@@ -230,7 +242,7 @@ export function MemoryTab({ searchQuery = "" }) {
                         />
                       </FormField>
                     </div>
-                    <div className="mt-3">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <Button
                         variant="secondary"
                         disabled={isSaving && savingMemoryId === item.memory_id}
@@ -249,7 +261,26 @@ export function MemoryTab({ searchQuery = "" }) {
                       >
                         Save
                       </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={isRestoring && restoringMemoryId === item.memory_id}
+                        onClick={() => restoreMemory(item.memory_id)}
+                      >
+                        {isRestoring && restoringMemoryId === item.memory_id
+                          ? "Reverting..."
+                          : "Revert Last Change"}
+                      </Button>
                     </div>
+                    {restoredMemoryId === item.memory_id && restoredAuditId && (
+                      <p className="mt-2 text-xs text-[var(--v2-success-text)]">
+                        Restored from audit {restoredAuditId}.
+                      </p>
+                    )}
+                    {restoringMemoryId === item.memory_id && restoreError && (
+                      <p className="mt-2 text-xs text-[var(--v2-danger-text)]">
+                        Restore failed: {restoreError?.message || t("common.unknown")}
+                      </p>
+                    )}
                   </div>
                 );
               })}

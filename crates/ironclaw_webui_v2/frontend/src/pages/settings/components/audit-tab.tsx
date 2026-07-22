@@ -1,7 +1,9 @@
 // @ts-nocheck
 import React from "react";
 import { Badge } from "../../../design-system/badge";
+import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
+import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
 import { useT } from "../../../lib/i18n";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { matchesSearch } from "../lib/settings-search";
@@ -28,11 +30,79 @@ function formatJson(value) {
   return JSON.stringify(value, null, 2);
 }
 
+function deltaTone(change) {
+  if (change === "added") return "success";
+  if (change === "removed") return "danger";
+  return "info";
+}
+
+function parseRestoreTarget(endpoint) {
+  const segments = String(endpoint || "")
+    .split("/")
+    .filter(Boolean);
+  if (segments.length < 7) return null;
+  if (segments[0] !== "api" || segments[1] !== "webchat" || segments[2] !== "v2") {
+    return null;
+  }
+  if (segments[3] !== "settings" || segments[6] !== "revert") {
+    return null;
+  }
+  return {
+    group: segments[4],
+    id: decodeURIComponent(segments[5]),
+  };
+}
+
+async function executeRestore(endpoint, auditId, t) {
+  const target = parseRestoreTarget(endpoint);
+  if (!target) {
+    throw new Error(t("audit.restoreUnsupported"));
+  }
+  if (target.group === "identity") {
+    await revertSettingsIdentity(target.id, auditId);
+    return;
+  }
+  if (target.group === "memory") {
+    await revertSettingsMemory(target.id, auditId);
+    return;
+  }
+  if (target.group === "tool-policies") {
+    await revertSettingsToolPolicy(target.id, auditId);
+    return;
+  }
+  if (target.group === "model-profiles") {
+    await revertSettingsModelProfile(target.id, auditId);
+    return;
+  }
+  if (target.group === "agents") {
+    await revertSettingsAgent(target.id, auditId);
+    return;
+  }
+  if (target.group === "channel-config") {
+    await revertSettingsChannelConfig(target.id, auditId);
+    return;
+  }
+  if (target.group === "skills") {
+    await revertSettingsSkill(target.id, auditId);
+    return;
+  }
+  throw new Error(t("audit.restoreUnsupported"));
+}
+
 export function AuditTab({ searchQuery = "" }) {
   const t = useT();
   const { entries, query } = useAuditSettings();
   const [diffState, setDiffState] = React.useState({});
   const [restoreState, setRestoreState] = React.useState({});
+  const [restoreDialog, setRestoreDialog] = React.useState({
+    open: false,
+    auditId: "",
+    target: "",
+    endpoint: "",
+    supported: false,
+    reason: "",
+    isEligible: false,
+  });
 
   const loadDiff = React.useCallback(async (auditId) => {
     setDiffState((current) => ({
@@ -85,72 +155,70 @@ export function AuditTab({ searchQuery = "" }) {
     }));
   }, [diffState, loadDiff]);
 
-  const restoreFromDiff = React.useCallback(async (auditId) => {
-    setRestoreState((state) => ({
-      ...state,
-      [auditId]: { isLoading: true, error: "", success: false },
-    }));
-
+  const openRestoreDialog = React.useCallback(async (auditId) => {
     let diff = diffState[auditId]?.data;
     if (!diff) {
       diff = await loadDiff(auditId);
     }
-    if (!diff?.restore_validation?.supported) {
+    if (!diff) {
       setRestoreState((state) => ({
         ...state,
         [auditId]: {
           isLoading: false,
-          error: t("audit.restoreUnsupported"),
+          error: t("audit.restoreFailed", {
+            message: t("audit.diffFailed", { message: t("common.unknown") }),
+          }),
           success: false,
         },
       }));
       return;
     }
 
-    const endpoint = String(diff.restore_validation.revert_endpoint || "");
-    const segments = endpoint.split("/").filter(Boolean);
-    const targetLabel = `${diff.entity_type}/${diff.entity_id}`;
+    const endpoint = String(diff?.restore_validation?.revert_endpoint || "");
+    const supported = Boolean(diff?.restore_validation?.supported);
+    const reason = String(diff?.restore_validation?.reason || "");
+    const status = String(diff?.restore_validation?.status || "");
 
-    const confirmed = window.confirm(
-      [
-        `Restore ${targetLabel}?`,
-        "",
-        "This will overwrite current settings with the recorded before_snapshot.",
-        `Endpoint: ${endpoint || "(not provided)"}`,
-      ].join("\n")
-    );
+    setRestoreDialog({
+      open: true,
+      auditId,
+      target: `${diff?.entity_type || "?"}/${diff?.entity_id || "?"}`,
+      endpoint,
+      supported,
+      reason,
+      isEligible: supported && status === "eligible" && Boolean(endpoint),
+    });
+  }, [diffState, loadDiff, t]);
 
-    if (!confirmed) {
+  const restoreFromDialog = React.useCallback(async () => {
+    const auditId = restoreDialog.auditId;
+    if (!auditId) return;
+
+    setRestoreState((state) => ({
+      ...state,
+      [auditId]: { isLoading: true, error: "", success: false },
+    }));
+
+    if (!restoreDialog.isEligible) {
       setRestoreState((state) => ({
         ...state,
-        [auditId]: { isLoading: false, error: "", success: false },
+        [auditId]: {
+          isLoading: false,
+          error: `${t("audit.restoreUnsupported")}${restoreDialog.reason ? ` (${restoreDialog.reason})` : ""}`,
+          success: false,
+        },
       }));
       return;
     }
 
     try {
-      if (segments[4] === "identity" && segments[6] === "revert") {
-        await revertSettingsIdentity(decodeURIComponent(segments[5]), auditId);
-      } else if (segments[4] === "memory" && segments[6] === "revert") {
-        await revertSettingsMemory(decodeURIComponent(segments[5]), auditId);
-      } else if (segments[4] === "tool-policies" && segments[6] === "revert") {
-        await revertSettingsToolPolicy(decodeURIComponent(segments[5]), auditId);
-      } else if (segments[4] === "model-profiles" && segments[6] === "revert") {
-        await revertSettingsModelProfile(decodeURIComponent(segments[5]), auditId);
-      } else if (segments[4] === "agents" && segments[6] === "revert") {
-        await revertSettingsAgent(decodeURIComponent(segments[5]), auditId);
-      } else if (segments[4] === "channel-config" && segments[6] === "revert") {
-        await revertSettingsChannelConfig(decodeURIComponent(segments[5]), auditId);
-      } else if (segments[4] === "skills" && segments[6] === "revert") {
-        await revertSettingsSkill(decodeURIComponent(segments[5]), auditId);
-      } else {
-        throw new Error(t("audit.restoreUnsupported"));
-      }
+      await executeRestore(restoreDialog.endpoint, auditId, t);
 
       setRestoreState((state) => ({
         ...state,
         [auditId]: { isLoading: false, error: "", success: true },
       }));
+      setRestoreDialog((state) => ({ ...state, open: false }));
       void query.refetch();
       void loadDiff(auditId);
     } catch (error) {
@@ -163,7 +231,7 @@ export function AuditTab({ searchQuery = "" }) {
         },
       }));
     }
-  }, [diffState, loadDiff, query, t]);
+  }, [loadDiff, query, restoreDialog, t]);
 
   if (query.isLoading) {
     return (
@@ -245,25 +313,30 @@ export function AuditTab({ searchQuery = "" }) {
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() => toggleDiff(entry.audit_id)}
-                      className="rounded-md border border-[var(--v2-panel-border)] px-2 py-1 text-xs font-medium text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
                     >
                       {diffState[entry.audit_id]?.isOpen
                         ? t("audit.hideDiff")
                         : t("audit.showDiff")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => restoreFromDiff(entry.audit_id)}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => openRestoreDialog(entry.audit_id)}
                       disabled={Boolean(restoreState[entry.audit_id]?.isLoading)}
-                      className="rounded-md border border-[var(--v2-panel-border)] px-2 py-1 text-xs font-medium text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {restoreState[entry.audit_id]?.isLoading
                         ? t("audit.restoring")
                         : t("audit.restore")}
-                    </button>
+                    </Button>
+                    <Badge
+                      tone={entry.has_before_snapshot ? "info" : "warning"}
+                      size="sm"
+                      label={entry.has_before_snapshot ? "revertable" : "no before snapshot"}
+                    />
                   </div>
 
                   {restoreState[entry.audit_id]?.error && (
@@ -295,6 +368,10 @@ export function AuditTab({ searchQuery = "" }) {
                               {diffState[entry.audit_id]?.data?.entity_type}/{diffState[entry.audit_id]?.data?.entity_id}
                             </div>
                             <div className="mt-1">
+                              <span className="font-semibold text-[var(--v2-text-strong)]">Changed fields:</span>{" "}
+                              {(diffState[entry.audit_id]?.data?.diff || []).length}
+                            </div>
+                            <div className="mt-1">
                               <span className="font-semibold text-[var(--v2-text-strong)]">Restore Endpoint:</span>{" "}
                               {diffState[entry.audit_id]?.data?.restore_validation?.revert_endpoint || "-"}
                             </div>
@@ -312,10 +389,12 @@ export function AuditTab({ searchQuery = "" }) {
                                 key={`${entry.audit_id}:${delta.path}:${delta.change}`}
                                 className="rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-2"
                               >
-                                <div className="font-mono text-[11px] text-[var(--v2-text-strong)]">
-                                  {delta.path}
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="font-mono text-[11px] text-[var(--v2-text-strong)]">
+                                    {delta.path}
+                                  </div>
+                                  <Badge tone={deltaTone(delta.change)} size="sm" label={delta.change} />
                                 </div>
-                                <div className="text-xs text-[var(--v2-text-muted)]">{delta.change}</div>
                                 <div className="mt-1 grid gap-1 sm:grid-cols-2">
                                   <pre className="overflow-x-auto rounded bg-[var(--v2-canvas)] p-2 text-[10px] text-[var(--v2-text-muted)]">
                                     {`before\n${formatJson(delta.before)}`}
@@ -350,6 +429,52 @@ export function AuditTab({ searchQuery = "" }) {
             </div>
           )}
       </Card>
+
+      <Modal
+        open={restoreDialog.open}
+        onClose={() => setRestoreDialog((state) => ({ ...state, open: false }))}
+        title="Restore Audit Snapshot"
+        size="lg"
+      >
+        <ModalBody>
+          <div className="space-y-3 text-sm text-[var(--v2-text-muted)]">
+            <p>
+              You are restoring <span className="font-semibold text-[var(--v2-text-strong)]">{restoreDialog.target || "-"}</span>
+              {" "}from audit <span className="font-mono text-[var(--v2-text-strong)]">{restoreDialog.auditId || "-"}</span>.
+            </p>
+            <div className="rounded border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
+              <div className="mb-1 text-xs uppercase tracking-[0.08em] text-[var(--v2-text-faint)]">Restore endpoint</div>
+              <div className="font-mono text-xs text-[var(--v2-text-strong)] break-all">
+                {restoreDialog.endpoint || "-"}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                tone={restoreDialog.isEligible ? "success" : "warning"}
+                label={restoreDialog.isEligible ? "eligible" : "ineligible"}
+              />
+              {!restoreDialog.isEligible && restoreDialog.reason && (
+                <span className="text-xs">Reason: {restoreDialog.reason}</span>
+              )}
+            </div>
+            <p className="text-xs">
+              Restoring overwrites current values with the historical before_snapshot.
+            </p>
+          </div>
+        </ModalBody>
+        <ModalFooter>
+          <Button variant="ghost" onClick={() => setRestoreDialog((state) => ({ ...state, open: false }))}>
+            Cancel
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={!restoreDialog.isEligible || Boolean(restoreState[restoreDialog.auditId]?.isLoading)}
+            onClick={() => void restoreFromDialog()}
+          >
+            {restoreState[restoreDialog.auditId]?.isLoading ? t("audit.restoring") : t("audit.restore")}
+          </Button>
+        </ModalFooter>
+      </Modal>
     </div>
   );
 }

@@ -29,7 +29,11 @@ export function useAuditSettings() {
   });
 
   const entries = useMemo(
-    () => (query.data?.entries || []).map(auditFromEntry).filter(Boolean),
+    () =>
+      (query.data?.entries || [])
+        .map(auditFromEntry)
+        .filter(Boolean)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [query.data]
   );
 

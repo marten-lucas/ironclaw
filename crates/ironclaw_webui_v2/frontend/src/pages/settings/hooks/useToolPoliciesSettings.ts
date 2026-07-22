@@ -1,7 +1,12 @@
 // @ts-nocheck
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchSettingsToolPolicies, upsertSettingsToolPolicy } from "../lib/settings-api";
+import {
+  fetchSettingsAudit,
+  fetchSettingsToolPolicies,
+  revertSettingsToolPolicy,
+  upsertSettingsToolPolicy,
+} from "../lib/settings-api";
 
 function policyFromEntry(entry) {
   if (!entry?.key?.startsWith("tool_policy.")) return null;
@@ -45,6 +50,46 @@ export function useToolPoliciesSettings() {
           entries: [...withoutUpdated, entry],
         };
       });
+      queryClient.invalidateQueries({ queryKey: ["settings-audit"] });
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: async (policyId) => {
+      const audit = await fetchSettingsAudit();
+      const entries = Array.isArray(audit?.entries) ? audit.entries : [];
+      const candidates = entries
+        .filter((entry) => entry?.key?.startsWith("audit."))
+        .map((entry) => {
+          const value = entry?.value || {};
+          const auditId = String(value.id || entry.key.slice("audit.".length));
+          return {
+            auditId,
+            entityType: String(value.entity_type || ""),
+            entityId: String(value.entity_id || ""),
+            beforeSnapshot: value.before_snapshot,
+            createdAt: String(value.created_at || ""),
+          };
+        })
+        .filter((entry) =>
+          entry.entityType === "tool_policy"
+          && entry.entityId === policyId
+          && entry.beforeSnapshot != null
+          && entry.auditId
+        )
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+      const latest = candidates[0];
+      if (!latest) {
+        throw new Error("No eligible audit snapshot found for this tool policy.");
+      }
+
+      await revertSettingsToolPolicy(policyId, latest.auditId);
+      return { policyId, auditId: latest.auditId };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings-tool-policies"] });
+      queryClient.invalidateQueries({ queryKey: ["settings-audit"] });
     },
   });
 
@@ -60,5 +105,11 @@ export function useToolPoliciesSettings() {
     isSaving: mutation.isPending,
     savingPolicyId: mutation.variables?.policyId,
     error: mutation.error,
+    restorePolicy: (policyId) => restoreMutation.mutate(policyId),
+    isRestoring: restoreMutation.isPending,
+    restoringPolicyId: restoreMutation.variables,
+    restoreError: restoreMutation.error,
+    restoredPolicyId: restoreMutation.data?.policyId,
+    restoredAuditId: restoreMutation.data?.auditId,
   };
 }

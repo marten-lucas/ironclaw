@@ -321,6 +321,13 @@ struct StubServices {
     /// Records the `enabled` value each `set_auto_activate_learned` call passes,
     /// so the handler test can assert the request body reaches the facade.
     set_auto_activate_learned_calls: Mutex<Vec<bool>>,
+    read_skill_content_response: Mutex<Option<RebornSkillContentResponse>>,
+    install_skill_calls: Mutex<Vec<(String, Option<String>)>>,
+    update_skill_calls: Mutex<Vec<(String, String)>>,
+    remove_skill_calls: Mutex<Vec<String>>,
+    allow_skill_install: Mutex<bool>,
+    allow_skill_update: Mutex<bool>,
+    allow_skill_remove: Mutex<bool>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -422,6 +429,22 @@ impl StubServices {
 
     fn set_next_submit_response(&self, response: RebornSubmitTurnResponse) {
         *self.next_submit_response.lock().expect("lock") = Some(response);
+    }
+
+    fn set_skill_content_response(&self, response: Option<RebornSkillContentResponse>) {
+        *self.read_skill_content_response.lock().expect("lock") = response;
+    }
+
+    fn set_allow_skill_install(&self, allow: bool) {
+        *self.allow_skill_install.lock().expect("lock") = allow;
+    }
+
+    fn set_allow_skill_update(&self, allow: bool) {
+        *self.allow_skill_update.lock().expect("lock") = allow;
+    }
+
+    fn set_allow_skill_remove(&self, allow: bool) {
+        *self.allow_skill_remove.lock().expect("lock") = allow;
     }
 }
 
@@ -973,9 +996,19 @@ impl RebornServicesApi for StubServices {
     async fn install_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
+        name: String,
+        content: Option<String>,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.install_skill_calls
+            .lock()
+            .expect("lock")
+            .push((name.clone(), content));
+        if *self.allow_skill_install.lock().expect("lock") {
+            return Ok(RebornSkillActionResponse {
+                success: true,
+                message: format!("installed {name}"),
+            });
+        }
         Err(rejecting_reborn_services_error())
     }
 
@@ -984,23 +1017,43 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        if let Some(response) = self.read_skill_content_response.lock().expect("lock").clone() {
+            return Ok(response);
+        }
         Err(rejecting_reborn_services_error())
     }
 
     async fn update_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
+        name: String,
+        content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.update_skill_calls
+            .lock()
+            .expect("lock")
+            .push((name.clone(), content));
+        if *self.allow_skill_update.lock().expect("lock") {
+            return Ok(RebornSkillActionResponse {
+                success: true,
+                message: format!("updated {name}"),
+            });
+        }
         Err(rejecting_reborn_services_error())
     }
 
     async fn remove_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
+        name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        self.remove_skill_calls.lock().expect("lock").push(name.clone());
+        if *self.allow_skill_remove.lock().expect("lock") {
+            return Ok(RebornSkillActionResponse {
+                success: true,
+                message: format!("removed {name}"),
+            });
+        }
         Err(rejecting_reborn_services_error())
     }
 
@@ -3509,6 +3562,243 @@ async fn revert_skill_rejects_mismatched_audit_target() {
 }
 
 #[tokio::test]
+async fn install_skill_writes_before_after_audit_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services.set_allow_skill_install(true);
+    services.set_skill_content_response(Some(RebornSkillContentResponse {
+        content: "before content".to_string(),
+    }));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"skill-alpha","content":"after content"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services.install_skill_calls.lock().expect("lock").clone(),
+        vec![
+            (
+                "skill-alpha".to_string(),
+                Some("after content".to_string()),
+            )
+        ]
+    );
+
+    let audit_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert!(
+        audit_calls.iter().any(|(key, value)| {
+            key.starts_with("audit.sk.")
+                && value["entity_type"] == "skill"
+                && value["entity_id"] == "skill-alpha"
+                && value["action"] == "upsert"
+                && value["before_snapshot"]
+                    == serde_json::json!({
+                        "kind": "skill_content",
+                        "content": "before content"
+                    })
+                && value["after_snapshot"]
+                    == serde_json::json!({
+                        "kind": "skill_content",
+                        "content": "after content"
+                    })
+        }),
+        "skill install must emit content audit snapshot pair"
+    );
+}
+
+#[tokio::test]
+async fn update_skill_writes_before_after_audit_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services.set_allow_skill_update(true);
+    services.set_skill_content_response(Some(RebornSkillContentResponse {
+        content: "before content".to_string(),
+    }));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/skills/skill-alpha")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"content":"after content"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services.update_skill_calls.lock().expect("lock").clone(),
+        vec![("skill-alpha".to_string(), "after content".to_string())]
+    );
+
+    let audit_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert!(
+        audit_calls.iter().any(|(key, value)| {
+            key.starts_with("audit.sk.")
+                && value["entity_type"] == "skill"
+                && value["entity_id"] == "skill-alpha"
+                && value["action"] == "upsert"
+                && value["before_snapshot"]
+                    == serde_json::json!({
+                        "kind": "skill_content",
+                        "content": "before content"
+                    })
+                && value["after_snapshot"]
+                    == serde_json::json!({
+                        "kind": "skill_content",
+                        "content": "after content"
+                    })
+        }),
+        "skill update must emit content audit snapshot pair"
+    );
+}
+
+#[tokio::test]
+async fn remove_skill_writes_before_after_audit_snapshot() {
+    let services = Arc::new(StubServices::default());
+    services.set_allow_skill_remove(true);
+    services.set_skill_content_response(Some(RebornSkillContentResponse {
+        content: "before content".to_string(),
+    }));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/skills/skill-alpha")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services.remove_skill_calls.lock().expect("lock").clone(),
+        vec!["skill-alpha".to_string()]
+    );
+
+    let audit_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert!(
+        audit_calls.iter().any(|(key, value)| {
+            key.starts_with("audit.sk.")
+                && value["entity_type"] == "skill"
+                && value["entity_id"] == "skill-alpha"
+                && value["action"] == "remove"
+                && value["before_snapshot"]
+                    == serde_json::json!({
+                        "kind": "skill_content",
+                        "content": "before content"
+                    })
+                && value["after_snapshot"]
+                    == serde_json::json!({
+                        "kind": "skill_content",
+                        "content": serde_json::Value::Null
+                    })
+        }),
+        "skill removal must emit deleted content snapshot"
+    );
+}
+
+#[tokio::test]
+async fn revert_skill_content_tries_update_then_install_fallback() {
+    let services = Arc::new(StubServices::default());
+    services.set_allow_skill_update(false);
+    services.set_allow_skill_install(true);
+    services
+        .operator_config_entries
+        .lock()
+        .expect("lock")
+        .push(operator_config_entry(
+            "audit.entry-1".to_string(),
+            serde_json::json!({
+                "actor_id": "user",
+                "entity_type": "skill",
+                "entity_id": "skill-alpha",
+                "action": "upsert",
+                "before_snapshot": {
+                    "kind": "skill_content",
+                    "content": "restored content"
+                },
+                "after_snapshot": null,
+                "summary": null,
+                "created_at": null
+            }),
+        ));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/skills/skill-alpha/revert")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"audit_id":"entry-1"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services.update_skill_calls.lock().expect("lock").clone(),
+        vec![("skill-alpha".to_string(), "restored content".to_string())],
+        "revert must attempt skill update first"
+    );
+    assert_eq!(
+        services.install_skill_calls.lock().expect("lock").clone(),
+        vec![
+            (
+                "skill-alpha".to_string(),
+                Some("restored content".to_string()),
+            )
+        ],
+        "revert must fallback to install when update fails"
+    );
+
+    let audit_calls = services
+        .set_operator_config_key_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert!(
+        audit_calls.iter().any(|(key, value)| {
+            key.starts_with("audit.sk.")
+                && value["entity_type"] == "skill"
+                && value["entity_id"] == "skill-alpha"
+                && value["action"] == "revert"
+        }),
+        "skill-content revert must emit audit"
+    );
+}
+
+#[tokio::test]
 async fn upsert_tool_policy_writes_before_after_audit_snapshot() {
     let services = Arc::new(StubServices::default());
     services
@@ -3659,6 +3949,28 @@ async fn upsert_model_profile_writes_before_after_audit_snapshot() {
         }),
         "model profile upsert must emit audit snapshot pair"
     );
+}
+
+#[tokio::test]
+async fn upsert_model_profile_rejects_blank_model() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/settings/model-profiles/default")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"   ","temperature":"0.2"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["field"], "model");
 }
 
 #[tokio::test]

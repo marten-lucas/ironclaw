@@ -714,3 +714,38 @@ Dieser Abschnitt dokumentiert den tatsächlich umgesetzten Teil des Programms un
 - Epic D: Zentraler Policy-Decision-Point mit allow/deny/escalate wirksam.
 - Epic E: Nextcloud Talk Mention-zu-Reply-Fullflow robust und getestet.
 - Epic F: Diff/Revert fuer alle kritischen Entitaeten plus sichere Restore-UX.
+
+### 13.6 Iteration-2 Abnahmevorbereitung (Stand 2026-07-21)
+
+Fuer den naechsten Abnahmelauf wurden ausfuehrbare Entry-Points und Evidenzartefakte vorbereitet:
+
+- API Smoke fuer I2-01/I2-02:
+  - `deployment/tests/iteration2_authoring_api_smoke.mjs`
+  - prueft edit -> diff -> revert fuer `identity`, `memory`, `tool_policy`
+- Kombinierter Iteration-2 Runner:
+  - `deployment/iteration2_acceptance_run.sh`
+  - fuehrt Authoring-API-Smoke + Nextcloud-Connection-Smoke + optionale Run-Korrelation aus
+- Runbook fuer den operativen Ablauf:
+  - `deployment/ITERATION2_ACCEPTANCE_RUNBOOK.md`
+
+Empfohlener Startbefehl fuer den Abnahmetag:
+
+```bash
+cd deployment
+source .env.e2e
+./iteration2_acceptance_run.sh ./.env.e2e
+```
+
+Damit sind die offenen Iteration-2 Punkte auf reproduzierbare Ausfuehrung und Evidenzsammlung vorbereitet; verbleibend ist die Live-Durchfuehrung (insb. headed Nextcloud Mention->Reply E2E) und das finale Abnahmeprotokoll.
+
+### 13.7 Iteration-2 Implementierungsstand (Update 2026-07-21)
+
+- I2-01 (Governed Authoring UI) umgesetzt im WebUI-v2-Frontend:
+  - Identity-, Memory- und Tool-Policy-Tabs unterstuetzen jetzt neben Edit/Save auch direkte Revert-Aktionen pro Datensatz (auf Basis des juengsten eligible Audit-Snapshots).
+  - Revert-Erfolg/Fehler wird pro Datensatz als UI-Status angezeigt.
+- I2-02 (Audit-UX) erweitert:
+  - Audit-Eintraege werden neueste-zuerst dargestellt.
+  - Diff-Ansicht zeigt bessere Lesbarkeit (Change-Badges, gezaehlte Feld-Aenderungen, klarere Before/After-Bloecke).
+  - Restore laeuft ueber einen expliziten Dialog mit Eligibility-Status, Endpoint-Transparenz und klarer Risikobeschreibung.
+
+Verbleibend fuer Iteration 2: Live-E2E-Nachweise (I2-03) und finaler Endabnahmebericht (I2-04).

@@ -24,7 +24,19 @@ function parseVersion(value) {
 
 export function ToolPoliciesTab({ searchQuery = "" }) {
   const t = useT();
-  const { policies, query, savePolicy, isSaving, savingPolicyId } = useToolPoliciesSettings();
+  const {
+    policies,
+    query,
+    savePolicy,
+    isSaving,
+    savingPolicyId,
+    restorePolicy,
+    isRestoring,
+    restoringPolicyId,
+    restoreError,
+    restoredPolicyId,
+    restoredAuditId,
+  } = useToolPoliciesSettings();
   const [drafts, setDrafts] = React.useState({});
   const [createDraft, setCreateDraft] = React.useState({
     policy_id: "",
@@ -197,7 +209,7 @@ export function ToolPoliciesTab({ searchQuery = "" }) {
                         />
                       </FormField>
                     </div>
-                    <div className="mt-3">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <Button
                         variant="secondary"
                         disabled={isSaving && savingPolicyId === item.policy_id}
@@ -214,7 +226,26 @@ export function ToolPoliciesTab({ searchQuery = "" }) {
                       >
                         Save
                       </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={isRestoring && restoringPolicyId === item.policy_id}
+                        onClick={() => restorePolicy(item.policy_id)}
+                      >
+                        {isRestoring && restoringPolicyId === item.policy_id
+                          ? "Reverting..."
+                          : "Revert Last Change"}
+                      </Button>
                     </div>
+                    {restoredPolicyId === item.policy_id && restoredAuditId && (
+                      <p className="mt-2 text-xs text-[var(--v2-success-text)]">
+                        Restored from audit {restoredAuditId}.
+                      </p>
+                    )}
+                    {restoringPolicyId === item.policy_id && restoreError && (
+                      <p className="mt-2 text-xs text-[var(--v2-danger-text)]">
+                        Restore failed: {restoreError?.message || t("common.unknown")}
+                      </p>
+                    )}
                   </div>
                 );
               })}

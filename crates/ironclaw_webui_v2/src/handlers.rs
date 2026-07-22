@@ -117,6 +117,7 @@ const SETTINGS_SKILL_ID_MAX_BYTES: usize = OPERATOR_CONFIG_KEY_MAX_BYTES;
 const CHANNEL_CONFIG_OUTBOUND_PREFERENCES: &str = "outbound_preferences";
 const SKILL_RESTORE_AUTO_ACTIVATE_KIND: &str = "skill_auto_activate";
 const SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND: &str = "auto_activate_learned";
+const SKILL_RESTORE_CONTENT_KIND: &str = "skill_content";
 const SKILL_AUTO_ACTIVATE_LEARNED_ENTITY_ID: &str = "auto_activate_learned";
 
 #[derive(Debug, Clone, Serialize)]
@@ -1565,10 +1566,21 @@ pub async fn install_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<InstallSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let before_snapshot = load_skill_content_snapshot(&state, &caller, &body.name).await?;
     let response = state
         .services()
-        .install_skill(caller, body.name, body.content)
+        .install_skill(caller.clone(), body.name.clone(), body.content.clone())
         .await?;
+    let after_snapshot = skill_content_snapshot(&body.content);
+    write_generated_skill_audit(
+        &state,
+        &caller,
+        &body.name,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1589,10 +1601,21 @@ pub async fn update_skill(
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<UpdateSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    let before_snapshot = load_skill_content_snapshot(&state, &caller, &name).await?;
     let response = state
         .services()
-        .update_skill(caller, name, body.content)
+        .update_skill(caller.clone(), name.clone(), body.content.clone())
         .await?;
+    let after_snapshot = skill_content_snapshot(&body.content);
+    write_generated_skill_audit(
+        &state,
+        &caller,
+        &name,
+        before_snapshot,
+        after_snapshot,
+        "upsert",
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1602,7 +1625,18 @@ pub async fn remove_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state.services().remove_skill(caller, name).await?;
+    let before_snapshot = load_skill_content_snapshot(&state, &caller, &name).await?;
+    let response = state.services().remove_skill(caller.clone(), name.clone()).await?;
+    let after_snapshot = skill_content_deleted_snapshot();
+    write_generated_skill_audit(
+        &state,
+        &caller,
+        &name,
+        before_snapshot,
+        after_snapshot,
+        "remove",
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -2244,6 +2278,7 @@ pub async fn upsert_settings_model_profile(
     Json(body): Json<SettingsModelProfileUpsertRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     validate_settings_config_entity_id("profile_id", &profile_id, SETTINGS_MODEL_PROFILE_ID_MAX_BYTES)?;
+    validate_settings_model_profile_payload(&body)?;
     let key = validate_operator_config_key(format!(
         "{SETTINGS_MODEL_PROFILE_CONFIG_PREFIX}{profile_id}"
     ))?;
@@ -2979,6 +3014,12 @@ pub async fn revert_settings_skill(
             .services()
             .set_auto_activate_learned(caller.clone(), restore.enabled)
             .await?
+    } else if restore.kind == SKILL_RESTORE_CONTENT_KIND {
+        let content = restore
+            .content
+            .as_deref()
+            .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
+        apply_skill_content_restore(&state, &caller, &skill_id, content).await?
     } else {
         state
             .services()
@@ -2986,7 +3027,15 @@ pub async fn revert_settings_skill(
             .await?
     };
 
-    let after_snapshot = skill_restore_snapshot(restore.kind, restore.enabled);
+    let after_snapshot = if restore.kind == SKILL_RESTORE_CONTENT_KIND {
+        let content = restore
+            .content
+            .as_deref()
+            .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
+        skill_content_snapshot(content)
+    } else {
+        skill_restore_snapshot(restore.kind, restore.enabled)
+    };
     let audit_entity_id = if restore.kind == SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND {
         SKILL_AUTO_ACTIVATE_LEARNED_ENTITY_ID
     } else {
@@ -3217,6 +3266,15 @@ fn validate_settings_memory_payload(body: &SettingsMemoryUpsertRequest) -> Resul
     }
     if body.content.trim().is_empty() {
         return Err(bad_request_with("content", WebUiInboundValidationCode::Blank));
+    }
+    Ok(())
+}
+
+fn validate_settings_model_profile_payload(
+    body: &SettingsModelProfileUpsertRequest,
+) -> Result<(), WebUiV2HttpError> {
+    if body.model.trim().is_empty() {
+        return Err(bad_request_with("model", WebUiInboundValidationCode::Blank));
     }
     Ok(())
 }
@@ -3720,6 +3778,7 @@ fn outbound_preferences_request_from_snapshot(
 struct SkillRestoreSnapshot<'a> {
     kind: &'a str,
     enabled: bool,
+    content: Option<String>,
 }
 
 fn skill_restore_from_snapshot(
@@ -3736,32 +3795,63 @@ fn skill_restore_from_snapshot(
         .get("kind")
         .and_then(|value| value.as_str())
         .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
-    let enabled = map
-        .get("enabled")
-        .and_then(|value| value.as_bool())
-        .ok_or_else(|| bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue))?;
-
-    let canonical_kind = match kind {
-        SKILL_RESTORE_AUTO_ACTIVATE_KIND => SKILL_RESTORE_AUTO_ACTIVATE_KIND,
-        SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND => SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND,
-        _ => {
-            return Err(bad_request_with(
-                "audit_id",
-                WebUiInboundValidationCode::InvalidValue,
-            ));
+    match kind {
+        SKILL_RESTORE_AUTO_ACTIVATE_KIND | SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND => {
+            let enabled = map
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .ok_or_else(|| {
+                    bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue)
+                })?;
+            Ok(SkillRestoreSnapshot {
+                kind: if kind == SKILL_RESTORE_AUTO_ACTIVATE_KIND {
+                    SKILL_RESTORE_AUTO_ACTIVATE_KIND
+                } else {
+                    SKILL_RESTORE_AUTO_ACTIVATE_LEARNED_KIND
+                },
+                enabled,
+                content: None,
+            })
         }
-    };
-
-    Ok(SkillRestoreSnapshot {
-        kind: canonical_kind,
-        enabled,
-    })
+        SKILL_RESTORE_CONTENT_KIND => {
+            let content = map
+                .get("content")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+                .ok_or_else(|| {
+                    bad_request_with("audit_id", WebUiInboundValidationCode::InvalidValue)
+                })?;
+            Ok(SkillRestoreSnapshot {
+                kind: SKILL_RESTORE_CONTENT_KIND,
+                enabled: false,
+                content: Some(content),
+            })
+        }
+        _ => Err(bad_request_with(
+            "audit_id",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
 }
 
 fn skill_restore_snapshot(kind: &str, enabled: bool) -> serde_json::Value {
     serde_json::json!({
         "kind": kind,
         "enabled": enabled,
+    })
+}
+
+fn skill_content_snapshot(content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": SKILL_RESTORE_CONTENT_KIND,
+        "content": content,
+    })
+}
+
+fn skill_content_deleted_snapshot() -> serde_json::Value {
+    serde_json::json!({
+        "kind": SKILL_RESTORE_CONTENT_KIND,
+        "content": serde_json::Value::Null,
     })
 }
 
@@ -3911,6 +4001,51 @@ async fn load_auto_activate_learned_snapshot(
         Err(error) => {
             tracing::debug!(?error, "failed to read global skill auto-activate snapshot for audit");
             Ok(None)
+        }
+    }
+}
+
+async fn load_skill_content_snapshot(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    skill_name: &str,
+) -> Result<Option<serde_json::Value>, WebUiV2HttpError> {
+    match state
+        .services()
+        .read_skill_content(caller.clone(), skill_name.to_string())
+        .await
+    {
+        Ok(response) => Ok(Some(skill_content_snapshot(&response.content))),
+        Err(error) => {
+            tracing::debug!(?error, "failed to read skill content snapshot for audit");
+            Ok(None)
+        }
+    }
+}
+
+async fn apply_skill_content_restore(
+    state: &WebUiV2State,
+    caller: &WebUiAuthenticatedCaller,
+    skill_name: &str,
+    content: &str,
+) -> Result<RebornSkillActionResponse, WebUiV2HttpError> {
+    match state
+        .services()
+        .update_skill(caller.clone(), skill_name.to_string(), content.to_string())
+        .await
+    {
+        Ok(response) => Ok(response),
+        Err(update_error) => {
+            tracing::debug!(?update_error, skill_name, "skill update failed during restore, trying install fallback");
+            let install = state
+                .services()
+                .install_skill(
+                    caller.clone(),
+                    skill_name.to_string(),
+                    Some(content.to_string()),
+                )
+                .await?;
+            Ok(install)
         }
     }
 }

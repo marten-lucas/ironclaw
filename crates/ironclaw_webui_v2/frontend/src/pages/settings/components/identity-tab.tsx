@@ -24,7 +24,19 @@ function parseVersion(value) {
 
 export function IdentityTab({ searchQuery = "" }) {
   const t = useT();
-  const { identities, query, saveIdentity, isSaving, savingIdentityId } = useIdentitySettings();
+  const {
+    identities,
+    query,
+    saveIdentity,
+    isSaving,
+    savingIdentityId,
+    restoreIdentity,
+    isRestoring,
+    restoringIdentityId,
+    restoreError,
+    restoredIdentityId,
+    restoredAuditId,
+  } = useIdentitySettings();
   const [drafts, setDrafts] = React.useState({});
   const [createDraft, setCreateDraft] = React.useState({
     identity_id: "",
@@ -198,7 +210,7 @@ export function IdentityTab({ searchQuery = "" }) {
                         />
                       </FormField>
                     </div>
-                    <div className="mt-3">
+                    <div className="mt-3 flex flex-wrap gap-2">
                       <Button
                         variant="secondary"
                         disabled={isSaving && savingIdentityId === item.identity_id}
@@ -217,7 +229,26 @@ export function IdentityTab({ searchQuery = "" }) {
                       >
                         Save
                       </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={isRestoring && restoringIdentityId === item.identity_id}
+                        onClick={() => restoreIdentity(item.identity_id)}
+                      >
+                        {isRestoring && restoringIdentityId === item.identity_id
+                          ? "Reverting..."
+                          : "Revert Last Change"}
+                      </Button>
                     </div>
+                    {restoredIdentityId === item.identity_id && restoredAuditId && (
+                      <p className="mt-2 text-xs text-[var(--v2-success-text)]">
+                        Restored from audit {restoredAuditId}.
+                      </p>
+                    )}
+                    {restoringIdentityId === item.identity_id && restoreError && (
+                      <p className="mt-2 text-xs text-[var(--v2-danger-text)]">
+                        Restore failed: {restoreError?.message || t("common.unknown")}
+                      </p>
+                    )}
                   </div>
                 );
               })}

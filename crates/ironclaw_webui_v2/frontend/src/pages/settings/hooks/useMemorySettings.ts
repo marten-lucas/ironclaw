@@ -1,7 +1,12 @@
 // @ts-nocheck
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchSettingsMemory, upsertSettingsMemory } from "../lib/settings-api";
+import {
+  fetchSettingsAudit,
+  fetchSettingsMemory,
+  revertSettingsMemory,
+  upsertSettingsMemory,
+} from "../lib/settings-api";
 
 function memoryFromEntry(entry) {
   if (!entry?.key?.startsWith("memory.")) return null;
@@ -45,6 +50,46 @@ export function useMemorySettings() {
           entries: [...withoutUpdated, entry],
         };
       });
+      queryClient.invalidateQueries({ queryKey: ["settings-audit"] });
+    },
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: async (memoryId) => {
+      const audit = await fetchSettingsAudit();
+      const entries = Array.isArray(audit?.entries) ? audit.entries : [];
+      const candidates = entries
+        .filter((entry) => entry?.key?.startsWith("audit."))
+        .map((entry) => {
+          const value = entry?.value || {};
+          const auditId = String(value.id || entry.key.slice("audit.".length));
+          return {
+            auditId,
+            entityType: String(value.entity_type || ""),
+            entityId: String(value.entity_id || ""),
+            beforeSnapshot: value.before_snapshot,
+            createdAt: String(value.created_at || ""),
+          };
+        })
+        .filter((entry) =>
+          entry.entityType === "memory"
+          && entry.entityId === memoryId
+          && entry.beforeSnapshot != null
+          && entry.auditId
+        )
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+      const latest = candidates[0];
+      if (!latest) {
+        throw new Error("No eligible audit snapshot found for this memory item.");
+      }
+
+      await revertSettingsMemory(memoryId, latest.auditId);
+      return { memoryId, auditId: latest.auditId };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings-memory"] });
+      queryClient.invalidateQueries({ queryKey: ["settings-audit"] });
     },
   });
 
@@ -60,5 +105,11 @@ export function useMemorySettings() {
     isSaving: mutation.isPending,
     savingMemoryId: mutation.variables?.memoryId,
     error: mutation.error,
+    restoreMemory: (memoryId) => restoreMutation.mutate(memoryId),
+    isRestoring: restoreMutation.isPending,
+    restoringMemoryId: restoreMutation.variables,
+    restoreError: restoreMutation.error,
+    restoredMemoryId: restoreMutation.data?.memoryId,
+    restoredAuditId: restoreMutation.data?.auditId,
   };
 }
